@@ -140,7 +140,7 @@ Option A: Use the dedicated Conda environment:
 2. Activate it:
 
    ```bash
-   conda activate stairset-generator
+   conda activate stairset-generation
    ```
 
 3. Run the Streamlit app:

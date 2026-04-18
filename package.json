@@ -1,5 +1,5 @@
 {
-    "name": "stairset-generator",
+    "name": "stairset-generation",
     "private": true,
     "type": "module",
     "scripts": {

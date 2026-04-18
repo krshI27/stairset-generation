@@ -1,4 +1,4 @@
-name: stairset-generator
+name: stairset-generation
 channels:
   - conda-forge
 dependencies:
