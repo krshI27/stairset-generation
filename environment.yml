@@ -2,7 +2,7 @@ name: stairset-generation
 channels:
   - conda-forge
 dependencies:
-  - python=3.12
+  - python=3.14
   - pip
   - pip:
       - streamlit>=1.26
