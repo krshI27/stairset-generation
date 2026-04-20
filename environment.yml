@@ -8,4 +8,5 @@ dependencies:
       - streamlit>=1.26
       - numpy>=1.26
       - plotly>=5.20
+      - matplotlib>=3.7 # headless render_png
       - -e ../vectorlab

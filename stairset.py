@@ -458,3 +458,66 @@ def export_obj(mesh_parts):
 
 def export_json(mesh_params):
     return json.dumps(mesh_params, indent=2)
+
+
+def render_png(
+    size: int = 800,
+    elev: float = 20.0,
+    azim: float = -60.0,
+    bg=None,
+    fisheye_strength: float = 0.0,
+    **stair_params,
+) -> bytes:
+    """Headless matplotlib render of a stairset → PNG bytes.
+
+    All `build_stair_mesh_parts` params pass through via **stair_params.
+    `bg=None` produces a transparent background; pass a matplotlib color
+    string to fill.
+    """
+    import io
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+
+    mesh_parts = build_stair_mesh_parts(**stair_params)
+
+    fig = plt.figure(figsize=(size / 150, size / 150), dpi=150)
+    ax = fig.add_subplot(111, projection="3d")
+    ax.set_axis_off()
+
+    all_v = []
+    for part in mesh_parts:
+        verts = part["vertices"]
+        if fisheye_strength > 0.0:
+            verts = apply_fisheye(verts, fisheye_strength)
+        faces = part["faces"]
+        tri = [[verts[i] for i in face] for face in faces]
+        poly = Poly3DCollection(tri, facecolor=part.get("color", "#999999"), edgecolor="none")
+        ax.add_collection3d(poly)
+        all_v.append(verts)
+
+    if all_v:
+        v = np.vstack(all_v)
+        mins, maxs = v.min(axis=0), v.max(axis=0)
+        ax.set_xlim(mins[0], maxs[0])
+        ax.set_ylim(mins[1], maxs[1])
+        ax.set_zlim(mins[2], maxs[2])
+
+    try:
+        ax.set_box_aspect((1, 1, 1))
+    except Exception:
+        pass
+    ax.view_init(elev=elev, azim=azim)
+
+    transparent = bg is None
+    if not transparent:
+        fig.patch.set_facecolor(bg)
+        ax.set_facecolor(bg)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, transparent=transparent, bbox_inches="tight", pad_inches=0)
+    plt.close(fig)
+    return buf.getvalue()
