@@ -8,3 +8,4 @@ dependencies:
       - streamlit>=1.26
       - numpy>=1.26
       - plotly>=5.20
+      - -e ../vectorlab

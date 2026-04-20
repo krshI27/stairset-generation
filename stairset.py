@@ -1,6 +1,7 @@
 import json
 
 import numpy as np
+from vectorlab import fisheye_vertex as _vectorlab_fisheye
 
 STEP_THICKNESS = 0.04
 RAIL_THICKNESS = 0.05
@@ -184,20 +185,7 @@ def build_cylinder(radius, height, center, segments=16):
 def apply_fisheye(vertices, strength=0.0, center=None):
     if strength <= 0.0:
         return vertices
-
-    transformed = vertices.copy()
-    if center is None:
-        center = np.array([transformed[:, 0].mean(), transformed[:, 2].mean()])
-
-    dx = transformed[:, 0] - center[0]
-    dz = transformed[:, 2] - center[1]
-    r = np.sqrt(dx * dx + dz * dz) + 1e-8
-    max_r = max(r.max(), 1.0)
-    distortion = 1.0 + 1.8 * strength * ((r / max_r) ** 2)
-    transformed[:, 0] = center[0] + dx * distortion
-    transformed[:, 2] = center[1] + dz * distortion
-    transformed[:, 1] = transformed[:, 1] + 0.08 * strength * ((r / max_r) ** 2)
-    return transformed
+    return _vectorlab_fisheye(vertices, strength=strength, center=center)
 
 
 def build_plotly_meshes(
@@ -274,27 +262,27 @@ def build_plotly_meshes(
 
 
 def build_polygon_footprint(sides, width, depth, center=(0.0, 0.0)):
-    cx, cz = center
+    cx, cy = center
     if sides == 4:
         dx = width / 2.0
-        dz = depth / 2.0
+        dy = depth / 2.0
         return [
-            (cx - dx, cz - dz),
-            (cx + dx, cz - dz),
-            (cx + dx, cz + dz),
-            (cx - dx, cz + dz),
+            (cx - dx, cy - dy),
+            (cx + dx, cy - dy),
+            (cx + dx, cy + dy),
+            (cx - dx, cy + dy),
         ]
 
     angles = np.linspace(0.0, 2.0 * np.pi, sides, endpoint=False)
     return [
-        (cx + np.cos(angle) * width / 2.0, cz + np.sin(angle) * depth / 2.0)
+        (cx + np.cos(angle) * width / 2.0, cy + np.sin(angle) * depth / 2.0)
         for angle in angles
     ]
 
 
-def build_prism_from_polygon(footprint, height, y_center):
-    bottom = [[x, y_center - height / 2.0, z] for x, z in footprint]
-    top = [[x, y_center + height / 2.0, z] for x, z in footprint]
+def build_prism_from_polygon(footprint, height, z_center):
+    bottom = [[x, y, z_center - height / 2.0] for x, y in footprint]
+    top = [[x, y, z_center + height / 2.0] for x, y in footprint]
     vertices = np.array(bottom + top, dtype=float)
     n = len(footprint)
     faces = []
@@ -341,7 +329,7 @@ def build_stair_mesh_parts(
         "front": (0.0, 1.0),
         "back": (0.0, -1.0),
     }
-    align_x, align_z = alignment_map.get(alignment, (0.0, 0.0))
+    align_x, align_y = alignment_map.get(alignment, (0.0, 0.0))
 
     base_width = max(0.05, float(base_width))
     base_depth = max(0.05, float(base_depth))
@@ -351,17 +339,17 @@ def build_stair_mesh_parts(
         step_width = max(0.05, base_width - width_decrease * index)
         step_depth = max(0.05, base_depth - depth_decrease * index)
         offset_x = align_x * (base_width - step_width) / 2.0
-        offset_z = align_z * (base_depth - step_depth) / 2.0
-        center_y = index * step_height + step_height / 2.0
+        offset_y = align_y * (base_depth - step_depth) / 2.0
+        center_z = index * step_height + step_height / 2.0
 
         footprint = build_polygon_footprint(
             polygon_sides,
             step_width,
             step_depth,
-            center=(offset_x, offset_z),
+            center=(offset_x, offset_y),
         )
         step_vertices, step_faces = build_prism_from_polygon(
-            footprint, step_height, center_y
+            footprint, step_height, center_z
         )
         mesh_parts.append(
             {
@@ -372,9 +360,9 @@ def build_stair_mesh_parts(
         )
         step_layout.append(
             {
-                "top_y": center_y + step_height / 2.0,
+                "top_z": center_z + step_height / 2.0,
                 "offset_x": offset_x,
-                "offset_z": offset_z,
+                "offset_y": offset_y,
                 "width": step_width,
                 "depth": step_depth,
                 "footprint": footprint,
@@ -394,7 +382,7 @@ def build_stair_mesh_parts(
         post_thickness = style["post_thickness"]
         is_round = style["rail_shape"] == "round"
 
-        direction = np.array([align_x, align_z], dtype=float)
+        direction = np.array([align_x, align_y], dtype=float)
         if np.linalg.norm(direction) < 1e-6:
             direction = np.array([1.0, 0.0], dtype=float)
         else:
@@ -408,7 +396,7 @@ def build_stair_mesh_parts(
         for step in step_layout:
             p = extreme_point(step["footprint"])
             keypoints.append(
-                np.array([p[0], step["top_y"] + rail_top_offset, p[1]], dtype=float)
+                np.array([p[0], p[1], step["top_z"] + rail_top_offset], dtype=float)
             )
 
         for i in range(len(keypoints) - 1):
@@ -430,11 +418,11 @@ def build_stair_mesh_parts(
                 {"vertices": rail_vertices, "faces": rail_faces, "color": handrail_color}
             )
 
-        vertical_axis = np.array([0.0, 1.0, 0.0], dtype=float)
+        vertical_axis = np.array([0.0, 0.0, 1.0], dtype=float)
         for i, step in enumerate(step_layout):
             top = keypoints[i]
             post_height = rail_top_offset
-            post_center = (float(top[0]), float(top[1] - post_height / 2.0), float(top[2]))
+            post_center = (float(top[0]), float(top[1]), float(top[2] - post_height / 2.0))
             if is_round:
                 post_vertices, post_faces = build_oriented_cylinder(
                     post_thickness / 2.0, post_height, post_center, vertical_axis, segments=12

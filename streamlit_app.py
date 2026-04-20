@@ -260,8 +260,8 @@ else:
 
 camera = dict(
     eye=dict(x=1.8, y=1.2, z=1.8),
-    center=dict(x=0, y=-0.15, z=0),
-    up=dict(x=0, y=1, z=0),
+    center=dict(x=center_x, y=center_y, z=center_z),
+    up=dict(x=0, y=0, z=1),
     projection={"type": projection_type},
 )
 
