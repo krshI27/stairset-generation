@@ -3,12 +3,6 @@ import json
 import numpy as np
 from vectorlab import fisheye_vertex as _vectorlab_fisheye
 
-STEP_THICKNESS = 0.04
-RAIL_THICKNESS = 0.05
-RAIL_HEIGHT = 0.9
-POST_SPACING = 0.8
-POST_THICKNESS = 0.05
-
 
 def build_box(width, height, depth, center):
     cx, cy, cz = center
@@ -133,6 +127,39 @@ def rotation_matrix_from_axis_angle(axis, angle):
 
 def transform_vertices(vertices, rotation, translation):
     return vertices.dot(rotation.T) + np.array(translation)
+
+
+def _build_box_oriented(par_size, perp_size, z_size, center, par_dir_2d, perp_dir_2d):
+    """Box aligned to an arbitrary 2D frame in the XY plane, standing upright in Z."""
+    par3 = np.array([par_dir_2d[0], par_dir_2d[1], 0.0]) * (par_size / 2)
+    per3 = np.array([perp_dir_2d[0], perp_dir_2d[1], 0.0]) * (perp_size / 2)
+    zv = np.array([0.0, 0.0, z_size / 2])
+    c = np.array(center, dtype=float)
+    verts = np.array(
+        [
+            c - par3 - per3 - zv,
+            c + par3 - per3 - zv,
+            c + par3 + per3 - zv,
+            c - par3 + per3 - zv,
+            c - par3 - per3 + zv,
+            c + par3 - per3 + zv,
+            c + par3 + per3 + zv,
+            c - par3 + per3 + zv,
+        ],
+        dtype=float,
+    )
+    faces = np.array(
+        [
+            [0, 1, 2], [0, 2, 3],
+            [4, 6, 5], [4, 7, 6],
+            [0, 4, 5], [0, 5, 1],
+            [1, 5, 6], [1, 6, 2],
+            [2, 6, 7], [2, 7, 3],
+            [3, 7, 4], [3, 4, 0],
+        ],
+        dtype=int,
+    )
+    return verts, faces
 
 
 def build_oriented_box(width, height, depth, center, direction):
@@ -261,179 +288,134 @@ def build_plotly_meshes(
     return traces
 
 
-def build_polygon_footprint(sides, width, depth, center=(0.0, 0.0)):
-    cx, cy = center
-    if sides == 4:
-        dx = width / 2.0
-        dy = depth / 2.0
-        return [
-            (cx - dx, cy - dy),
-            (cx + dx, cy - dy),
-            (cx + dx, cy + dy),
-            (cx - dx, cy + dy),
-        ]
-
-    angles = np.linspace(0.0, 2.0 * np.pi, sides, endpoint=False)
-    return [
-        (cx + np.cos(angle) * width / 2.0, cy + np.sin(angle) * depth / 2.0)
-        for angle in angles
-    ]
-
-
-def build_prism_from_polygon(footprint, height, z_center):
-    bottom = [[x, y, z_center - height / 2.0] for x, y in footprint]
-    top = [[x, y, z_center + height / 2.0] for x, y in footprint]
-    vertices = np.array(bottom + top, dtype=float)
-    n = len(footprint)
-    faces = []
-
-    for i in range(1, n - 1):
-        faces.append([0, i + 1, i])
-    for i in range(1, n - 1):
-        faces.append([n, n + i + 1, n + i])
-
-    for i in range(n):
-        next_i = (i + 1) % n
-        faces.append([i, next_i, next_i + n])
-        faces.append([i, next_i + n, i + n])
-
-    return vertices, np.array(faces, dtype=int)
-
-
 def build_stair_mesh_parts(
     step_count=8,
-    base_width=1.0,
-    base_depth=0.6,
+    step_width=1.0,
     step_height=0.18,
-    width_decrease=0.02,
-    depth_decrease=0.015,
-    polygon_sides=4,
-    alignment="center",
+    step_depth=0.28,
+    bottom_extension=0.0,
+    top_extension=0.0,
     enable_handrail=True,
     handrail_style="Metal",
+    rail_placement="side",
     support_count=4,
     stair_color="#cccccc",
     handrail_color="#404040",
 ):
+    """Linear staircase: each step i is a cumulative block (i+1)*step_height tall,
+    step_depth wide, step_width across. Steps ascend in Y and Z."""
     mesh_parts = []
-    step_layout = []
-
-    alignment_map = {
-        "center": (0.0, 0.0),
-        "front-left": (-1.0, 1.0),
-        "front-right": (1.0, 1.0),
-        "back-left": (-1.0, -1.0),
-        "back-right": (1.0, -1.0),
-        "left": (-1.0, 0.0),
-        "right": (1.0, 0.0),
-        "front": (0.0, 1.0),
-        "back": (0.0, -1.0),
-    }
-    align_x, align_y = alignment_map.get(alignment, (0.0, 0.0))
-
-    base_width = max(0.05, float(base_width))
-    base_depth = max(0.05, float(base_depth))
+    step_count = max(1, int(step_count))
+    step_width = max(0.05, float(step_width))
     step_height = max(0.01, float(step_height))
+    step_depth = max(0.05, float(step_depth))
+    bottom_extension = max(0.0, float(bottom_extension))
+    top_extension = max(0.0, float(top_extension))
 
-    for index in range(step_count):
-        step_width = max(0.05, base_width - width_decrease * index)
-        step_depth = max(0.05, base_depth - depth_decrease * index)
-        offset_x = align_x * (base_width - step_width) / 2.0
-        offset_y = align_y * (base_depth - step_depth) / 2.0
-        center_z = index * step_height + step_height / 2.0
+    for i in range(step_count):
+        y_front = float(i) * step_depth - (bottom_extension if i == 0 else 0.0)
+        y_back = float(i + 1) * step_depth + (top_extension if i == step_count - 1 else 0.0)
+        block_h = float(i + 1) * step_height
+        verts, faces = build_box(
+            step_width, y_back - y_front, block_h,
+            (0.0, (y_front + y_back) / 2.0, block_h / 2.0),
+        )
+        mesh_parts.append({"vertices": verts, "faces": faces, "color": stair_color})
 
-        footprint = build_polygon_footprint(
-            polygon_sides,
-            step_width,
-            step_depth,
-            center=(offset_x, offset_y),
-        )
-        step_vertices, step_faces = build_prism_from_polygon(
-            footprint, step_height, center_z
-        )
-        mesh_parts.append(
-            {
-                "vertices": step_vertices,
-                "faces": step_faces,
-                "color": stair_color,
-            }
-        )
-        step_layout.append(
-            {
-                "top_z": center_z + step_height / 2.0,
-                "offset_x": offset_x,
-                "offset_y": offset_y,
-                "width": step_width,
-                "depth": step_depth,
-                "footprint": footprint,
-            }
-        )
+    if not enable_handrail:
+        return mesh_parts
 
-    if enable_handrail and step_layout:
-        style_map = {
-            "Round": {"rail_thickness": 0.05, "post_thickness": 0.04, "rail_shape": "round", "rail_top_offset": 0.9},
-            "Square": {"rail_thickness": 0.06, "post_thickness": 0.05, "rail_shape": "square", "rail_top_offset": 0.9},
-            "Metal": {"rail_thickness": 0.045, "post_thickness": 0.035, "rail_shape": "round", "rail_top_offset": 0.9},
-            "Concrete ledge": {"rail_thickness": 0.12, "post_thickness": 0.08, "rail_shape": "square", "rail_top_offset": 0.75},
-        }
-        style = style_map.get(handrail_style, style_map["Metal"])
-        rail_top_offset = style["rail_top_offset"]
-        rail_thickness = style["rail_thickness"]
-        post_thickness = style["post_thickness"]
-        is_round = style["rail_shape"] == "round"
+    style_map = {
+        "Round":  {"rail_r": 0.025, "post_r": 0.020, "is_round": True,  "rail_height": 0.9},
+        "Square": {"rail_r": 0.030, "post_r": 0.025, "is_round": False, "rail_height": 0.9},
+        "Metal":  {"rail_r": 0.022, "post_r": 0.018, "is_round": True,  "rail_height": 0.9},
+        "Curb":   {"thickness": 0.15, "curb_height": 0.88},
+    }
+    style = style_map.get(handrail_style, style_map["Metal"])
 
-        direction = np.array([align_x, align_y], dtype=float)
-        if np.linalg.norm(direction) < 1e-6:
-            direction = np.array([1.0, 0.0], dtype=float)
+    if handrail_style == "Curb":
+        thickness = style["thickness"]
+        curb_height = style["curb_height"]
+        cx = 0.0 if rail_placement == "center" else step_width / 2.0 - thickness / 2.0
+        for i in range(step_count):
+            y_front = float(i) * step_depth - (bottom_extension if i == 0 else 0.0)
+            y_back = float(i + 1) * step_depth + (top_extension if i == step_count - 1 else 0.0)
+            top_z = float(i + 1) * step_height
+            lv, lf = build_box(
+                thickness, y_back - y_front, curb_height,
+                (cx, (y_front + y_back) / 2.0, top_z + curb_height / 2.0),
+            )
+            mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
+        return mesh_parts
+
+    # Round / Square / Metal
+    rail_height = style["rail_height"]
+    rail_r = style["rail_r"]
+    post_r = style["post_r"]
+    is_round = style["is_round"]
+    inset = post_r * 3.0
+    rail_x = 0.0 if rail_placement == "center" else step_width / 2.0 - inset
+
+    # Keypoints: at each step nosing (front edge of tread) at rail_height above tread
+    keypoints = []
+    if bottom_extension > 0.0:
+        keypoints.append(np.array([rail_x, -bottom_extension, step_height + rail_height]))
+    for i in range(step_count):
+        keypoints.append(np.array([
+            rail_x,
+            float(i) * step_depth,
+            float(i + 1) * step_height + rail_height,
+        ]))
+    if top_extension > 0.0:
+        keypoints.append(np.array([
+            rail_x,
+            float(step_count) * step_depth + top_extension,
+            float(step_count) * step_height + rail_height,
+        ]))
+    keypoints = np.array(keypoints)
+
+    overhang = 0.15
+    if len(keypoints) >= 2:
+        d0 = keypoints[1] - keypoints[0]
+        d0 /= np.linalg.norm(d0)
+        d1 = keypoints[-1] - keypoints[-2]
+        d1 /= np.linalg.norm(d1)
+        rail_pts = np.vstack([
+            keypoints[0:1] - d0 * overhang,
+            keypoints,
+            keypoints[-1:] + d1 * overhang,
+        ])
+    else:
+        rail_pts = keypoints
+
+    rail_w = rail_r * 2.0
+    for i in range(len(rail_pts) - 1):
+        a, b = rail_pts[i], rail_pts[i + 1]
+        seg = b - a
+        seg_len = float(np.linalg.norm(seg))
+        if seg_len < 1e-4:
+            continue
+        ctr = (a + b) / 2.0
+        if is_round:
+            rv, rf = build_oriented_cylinder(rail_r, seg_len, tuple(ctr), seg, segments=16)
         else:
-            direction = direction / np.linalg.norm(direction)
+            rv, rf = build_oriented_box(rail_w, rail_w, seg_len, tuple(ctr), seg)
+        mesh_parts.append({"vertices": rv, "faces": rf, "color": handrail_color})
 
-        def extreme_point(footprint):
-            pts = np.array(footprint, dtype=float)
-            return pts[np.argmax(np.dot(pts, direction))]
-
-        keypoints = []
-        for step in step_layout:
-            p = extreme_point(step["footprint"])
-            keypoints.append(
-                np.array([p[0], p[1], step["top_z"] + rail_top_offset], dtype=float)
-            )
-
-        for i in range(len(keypoints) - 1):
-            a, b = keypoints[i], keypoints[i + 1]
-            seg_dir = b - a
-            seg_length = float(np.linalg.norm(seg_dir))
-            if seg_length < 1e-4:
-                continue
-            seg_center = (a + b) / 2.0
-            if is_round:
-                rail_vertices, rail_faces = build_oriented_cylinder(
-                    rail_thickness / 2.0, seg_length, seg_center, seg_dir, segments=16
-                )
-            else:
-                rail_vertices, rail_faces = build_oriented_box(
-                    rail_thickness, rail_thickness, seg_length, seg_center, seg_dir
-                )
-            mesh_parts.append(
-                {"vertices": rail_vertices, "faces": rail_faces, "color": handrail_color}
-            )
-
-        vertical_axis = np.array([0.0, 0.0, 1.0], dtype=float)
-        for i, step in enumerate(step_layout):
-            top = keypoints[i]
-            post_height = rail_top_offset
-            post_center = (float(top[0]), float(top[1]), float(top[2] - post_height / 2.0))
-            if is_round:
-                post_vertices, post_faces = build_oriented_cylinder(
-                    post_thickness / 2.0, post_height, post_center, vertical_axis, segments=12
-                )
-            else:
-                post_vertices, post_faces = build_box(
-                    post_thickness, post_height, post_thickness, post_center
-                )
-            mesh_parts.append(
-                {"vertices": post_vertices, "faces": post_faces, "color": handrail_color}
-            )
+    # Posts evenly distributed across step nosings
+    post_idxs = np.unique(
+        np.round(np.linspace(0, step_count - 1, min(support_count, step_count))).astype(int)
+    )
+    vertical = np.array([0.0, 0.0, 1.0])
+    for i in post_idxs:
+        nosing_y = float(i) * step_depth
+        tread_z = float(i + 1) * step_height
+        post_ctr = (rail_x, nosing_y, tread_z + rail_height / 2.0)
+        if is_round:
+            pv, pf = build_oriented_cylinder(post_r, rail_height, post_ctr, vertical, segments=12)
+        else:
+            pv, pf = build_box(post_r * 2.0, post_r * 2.0, rail_height, post_ctr)
+        mesh_parts.append({"vertices": pv, "faces": pf, "color": handrail_color})
 
     return mesh_parts
 
