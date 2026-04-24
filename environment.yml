@@ -9,4 +9,4 @@ dependencies:
       - numpy>=1.26
       - plotly>=5.20
       - matplotlib>=3.7 # headless render_png
-      - -e ../vectorlab
+      - git+https://github.com/krshI27/vectorlab.git
