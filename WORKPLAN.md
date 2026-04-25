@@ -1,14 +1,14 @@
 # WORKPLAN — stairset-generation
 
-**Status**: Local only. GitHub mirror exists. Streamlit Cloud deployment unblocked.
-**Last changes**: UI params improved for usability, `render_png` headless rasterizer added, fisheye delegates to `vectorlab.fisheye_vertex` (2026-04-24)
+**Status**: DEPLOYED on Streamlit Cloud (2026-04-25). Preset loader done (ZV1-3). render_png rasterizer done.
+**Last changes**: `?preset=` URL loader + preset URL generator added (ZV1-3 done 2026-04-25). UI params improved, `render_png` rasterizer added (2026-04-24).
 
 ---
 
 ## This sprint (Apr 24 – May 1)
 
-- [ ] **STR-1** ~1hr: Deploy to Streamlit Cloud — connect `github.com/krshI27/stairset-generation`, test app loads + 3D mesh renders correctly
-- [ ] **ZV1-3** ~1hr: Add `?preset=` URL loader — read `DEFAULTS`-shaped JSON from `st.query_params`, populate `st.session_state` before widget init; test one saved preset round-trip
+- [x] **STR-1**: Deployed to Streamlit Cloud (2026-04-25)
+- [x] **ZV1-3** ~1hr: Add `?preset=` URL loader — read `DEFAULTS`-shaped JSON from `st.query_params`, populate `st.session_state` before widget init; test one saved preset round-trip
 - [ ] **STR-2** ~1hr: Evaluate stair renders as Prodigi print product — generate 3–4 strong outputs via `render_png`, check DPI requirements at A3 (300dpi min for Prodigi)
 
 ## Next sprint
