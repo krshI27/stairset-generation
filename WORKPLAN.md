@@ -5,17 +5,19 @@
 
 ---
 
-## This sprint (Apr 24 – May 1)
+## Active priorities (2026-04-25 — Path A: ready, just needs presets + DPI fix)
+
+### Path A: Zine Vol.1 preset rollout
+
+- [x] **ZV1-3** ~1hr: `?preset=` URL loader done (2026-04-25)
+- [ ] **STR-EXPORT** ~1hr: Fix `render_png` DPI — pass `dpi=300` to matplotlib figure; verify output ≥3508×4961px for A3@300dpi; add `st.download_button` for PNG. Required before zine print proof.
+- [ ] **ZV1-preset-stair** ~30min: Create 2–3 Zine Vol.1 candidate presets — run render, save params as `presets/zine-vol1-*.json`
+- [ ] **STR-2** ~1hr: Evaluate stair renders as Prodigi print product — pick 3–4 strongest outputs at A3 300dpi
+
+### Revenue path (deferred)
 
 - [x] **STR-1**: Deployed to Streamlit Cloud (2026-04-25)
-- [x] **ZV1-3** ~1hr: Add `?preset=` URL loader — read `DEFAULTS`-shaped JSON from `st.query_params`, populate `st.session_state` before widget init; test one saved preset round-trip
-- [ ] **STR-2** ~1hr: Evaluate stair renders as Prodigi print product — generate 3–4 strong outputs via `render_png`, check DPI requirements at A3 (300dpi min for Prodigi)
-
-## Next sprint
-
-- [ ] **STR-EXPORT** ~1hr: Fix `render_png` DPI — pass `dpi=300` to matplotlib figure; verify output is ≥3508×4961px for A3@300dpi; add `st.download_button` for PNG
-- [ ] **STR-PRODIGI** ~1hr: Add "Order Print" button → `render_png(dpi=300)` → upload bytes to R2 public bucket → `POST https://api.prodigi.com/v4.0/orders` with `GLOBAL-FAP-16.5X11.7` (A3); use `PRODIGI_API_KEY` from `.streamlit/secrets.toml`
-- [ ] **ZV1-preset-stair** ~30min: Create 2–3 Zine Vol.1 candidate presets — run render, save params as `presets/zine-vol1-*.json`
+- [ ] **STR-PRODIGI** ~1hr: "Order Print" button → `render_png(dpi=300)` → upload bytes to R2 public bucket → `POST https://api.prodigi.com/v4.0/orders` with `GLOBAL-FAP-16.5X11.7` (A3); `PRODIGI_API_KEY` from `.streamlit/secrets.toml`
 - [ ] **CRT-1** ~30min: Add stairset-generation to karoshirt.art `/create` gallery page
 - [ ] **EXHIBIT-STR** ~1hr: Embed steganographic watermark in exported PNG — preset ID + timestamp in pixel LSBs (see Exhibition Concept note)
 
