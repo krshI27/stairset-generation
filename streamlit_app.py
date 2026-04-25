@@ -1,3 +1,6 @@
+import json
+import urllib.parse
+
 import plotly.graph_objects as go
 import streamlit as st
 
@@ -48,6 +51,28 @@ DEFAULTS = {
     "stair_color": "#cccccc",
     "handrail_color": "#404040",
 }
+
+def _load_preset() -> None:
+    preset_raw = st.query_params.get("preset")
+    if not preset_raw:
+        return
+    preset_text = preset_raw[0] if isinstance(preset_raw, list) else preset_raw
+    try:
+        preset = json.loads(preset_text)
+        for key, value in preset.get("params", {}).items():
+            if key in DEFAULTS:
+                st.session_state.setdefault(key, value)
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        pass
+
+
+def _preset_url() -> str:
+    params = {key: st.session_state.get(key, default) for key, default in DEFAULTS.items()}
+    payload = {"name": "Stairset preset", "app": "stairset-generation", "params": params}
+    return f"?preset={urllib.parse.quote(json.dumps(payload, separators=(',', ':')))}"
+
+
+_load_preset()
 
 for key, default_value in DEFAULTS.items():
     if key not in st.session_state:
@@ -249,3 +274,7 @@ col2.download_button(
 
 with st.expander("Parameters (JSON)"):
     st.json(params)
+
+with st.expander("Preset URL"):
+    st.write("Share or embed these exact parameters:")
+    st.code(_preset_url())
