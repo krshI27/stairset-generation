@@ -19,26 +19,37 @@ st.set_page_config(
 
 st.markdown(
     """<style>
-    .main .block-container { padding-top: 0.5rem !important; padding-bottom: 0 !important; }
-    [data-testid="stPlotlyChart"] { height: calc(100vh - 90px) !important; min-height: 400px; }
+    /* Remove all top padding so the 3D viewer starts at the very top */
+    .main .block-container {
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
+    }
+    /* Give the Plotly chart as much vertical space as possible */
+    [data-testid="stPlotlyChart"] { height: calc(100vh - 52px) !important; min-height: 400px; }
     [data-testid="stPlotlyChart"] > div { height: 100% !important; min-height: 400px; }
+    /* Tighten the Streamlit header bar */
+    header[data-testid="stHeader"] { height: 2.5rem !important; min-height: 2.5rem !important; }
+    /* Sidebar app title styling */
+    .sidebar-title { font-size: 1.1rem; font-weight: 700; color: #262730; margin-bottom: 0.1rem; }
+    .sidebar-subtitle { font-size: 0.75rem; color: #6c7280; margin-bottom: 0.75rem; }
     </style>""",
     unsafe_allow_html=True,
 )
 
-st.markdown("### Stairset Generator")
-
 DEFAULTS = {
-    "step_count": 8,
     "step_width": 1.0,
     "step_height": 0.18,
     "step_depth": 0.28,
+    "run_pattern": "8",
+    "landing_depth": 0.9,
     "bottom_extension": 0.0,
     "top_extension": 0.0,
+    "rail_bottom_ext": True,
+    "rail_top_ext": True,
     "enable_handrail": True,
     "handrail_type": "Metal",
     "rail_placement": "Side",
-    "support_count": 4,
+    "pole_density": 0.3,
     "viewer_mode": "Face colors",
     "projection_type": "perspective",
     "fisheye_strength": 0.0,
@@ -72,6 +83,34 @@ def _preset_url() -> str:
     return f"?preset={urllib.parse.quote(json.dumps(payload, separators=(',', ':')))}"
 
 
+def _parse_run_pattern(pattern: str, depth: float):
+    """Parse a step / run pattern into (total_step_count, landings_list).
+
+    '8'       → (8, [])          single integer = step count, no landings
+    '3 5'     → (8, [{after 3}]) two runs with one landing between
+    '4 4 4'   → (12, [{…},{…}])  three runs, two landings
+    empty/bad → (None, None)
+    """
+    pattern = pattern.strip()
+    if not pattern:
+        return None, None
+    try:
+        parts = [int(p) for p in pattern.split()]
+    except ValueError:
+        return None, None
+    if any(p < 1 for p in parts):
+        return None, None
+    if len(parts) == 1:
+        return parts[0], []
+    total = sum(parts)
+    result = []
+    cumulative = 0
+    for run in parts[:-1]:
+        cumulative += run
+        result.append({"after_step": cumulative, "depth": float(depth)})
+    return total, result
+
+
 _load_preset()
 
 for key, default_value in DEFAULTS.items():
@@ -79,84 +118,150 @@ for key, default_value in DEFAULTS.items():
         st.session_state[key] = default_value
 
 with st.sidebar:
-    st.header("Parameters")
-    if st.button("Reset to default"):
+    st.markdown('<p class="sidebar-title">Stairset Generator</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sidebar-subtitle">Procedural stair model designer</p>', unsafe_allow_html=True)
+    if st.button("↺ Reset to defaults", use_container_width=True):
         for key, default_value in DEFAULTS.items():
             st.session_state[key] = default_value
-        st.experimental_rerun()
+        st.rerun()
 
     st.subheader("Steps")
-    step_count = st.slider("Step count", min_value=1, max_value=30, key="step_count")
-    step_width = st.number_input(
-        "Step width (m)", min_value=0.2, max_value=5.0, step=0.05, key="step_width"
+    run_pattern = st.text_input(
+        "Step / run pattern",
+        placeholder="8   or   3 5   or   4 4 4",
+        help="Single number = step count.  Multiple numbers = step runs separated by flat landings (e.g. `3 5` = 3 steps, landing, 5 steps).",
+        key="run_pattern",
     )
-    step_height = st.number_input(
-        "Step height (m)", min_value=0.05, max_value=0.4, step=0.01, key="step_height"
+    col_w, col_h, col_d = st.columns(3)
+    step_width = col_w.number_input(
+        "Width", min_value=0.2, max_value=5.0, step=0.05, key="step_width",
+        help="Step width in metres",
     )
-    step_depth = st.number_input(
-        "Step depth (m)", min_value=0.1, max_value=1.5, step=0.01, key="step_depth"
+    step_height = col_h.number_input(
+        "Height", min_value=0.05, max_value=0.4, step=0.01, key="step_height",
+        help="Riser height in metres",
     )
+    step_depth = col_d.number_input(
+        "Depth", min_value=0.1, max_value=1.5, step=0.01, key="step_depth",
+        help="Tread depth in metres",
+    )
+    # Pre-parse to decide whether to show landing depth widget
+    _pre_count, _pre_landings = _parse_run_pattern(
+        run_pattern, st.session_state.get("landing_depth", DEFAULTS["landing_depth"])
+    )
+    if _pre_landings:
+        landing_depth = st.number_input(
+            "Landing depth (m)", min_value=0.3, max_value=5.0, step=0.05, key="landing_depth"
+        )
+        _parsed_count, landings = _parse_run_pattern(run_pattern, landing_depth)
+        _run_parts = run_pattern.split()
+        st.caption("  →  ".join(_run_parts) + f"  ·  {_parsed_count} steps total")
+    else:
+        landing_depth = st.session_state.get("landing_depth", DEFAULTS["landing_depth"])
+        _parsed_count, landings = _pre_count, (_pre_landings if _pre_landings is not None else [])
+    if _parsed_count is not None:
+        step_count = _parsed_count
+    else:
+        step_count = 8
+        landings = []
+        if run_pattern.strip():
+            st.warning("Invalid — enter e.g. `8` or `3 5`")
 
-    st.subheader("Extensions")
-    bottom_extension = st.number_input(
-        "Bottom extension (m)", min_value=0.0, max_value=3.0, step=0.05, key="bottom_extension"
-    )
-    top_extension = st.number_input(
-        "Top extension (m)", min_value=0.0, max_value=3.0, step=0.05, key="top_extension"
-    )
+    with st.expander("Extensions", expanded=False):
+        bottom_extension = st.number_input(
+            "Bottom (m)", min_value=0.0, max_value=3.0, step=0.05, key="bottom_extension",
+            help="Flat platform added before step 1",
+        )
+        rail_bottom_ext = st.checkbox(
+            "Rail follows bottom extension",
+            key="rail_bottom_ext",
+            help="When unchecked the handrail stops at the first step nosing.",
+        )
+        top_extension = st.number_input(
+            "Top (m)", min_value=0.0, max_value=3.0, step=0.05, key="top_extension",
+            help="Flat platform added after the last step",
+        )
+        rail_top_ext = st.checkbox(
+            "Rail follows top extension",
+            key="rail_top_ext",
+            help="When unchecked the handrail stops at the last step nosing.",
+        )
 
     st.subheader("Handrail")
     enable_handrail = st.checkbox("Enable handrail", key="enable_handrail")
-    handrail_type = st.selectbox(
-        "Type",
-        options=["Round", "Square", "Metal", "Curb"],
-        key="handrail_type",
-    )
-    rail_placement = st.radio(
-        "Placement",
-        options=["Side", "Center"],
-        horizontal=True,
-        key="rail_placement",
-    )
-    if handrail_type != "Curb":
-        support_count = st.slider(
-            "Post count", min_value=2, max_value=16, key="support_count"
+    if enable_handrail:
+        handrail_type = st.selectbox(
+            "Type",
+            options=["Round", "Square", "Metal", "Curb"],
+            key="handrail_type",
         )
+        rail_placement = st.radio(
+            "Placement",
+            options=["Side", "Center"],
+            horizontal=True,
+            key="rail_placement",
+        )
+        if handrail_type != "Curb":
+            pole_density = st.slider(
+                "Post density", min_value=0.0, max_value=1.0, step=0.05,
+                key="pole_density",
+                help="0 = anchors only (first & last step of each run + landing edges).  "
+                     "0.5 = bisect runs progressively.  1 = one post per step.",
+            )
+        else:
+            pole_density = st.session_state["pole_density"]
     else:
-        support_count = st.session_state["support_count"]
+        handrail_type = st.session_state["handrail_type"]
+        rail_placement = st.session_state["rail_placement"]
+        pole_density = st.session_state["pole_density"]
 
-    st.markdown("---")
     st.subheader("Colors")
-    background_color = st.color_picker("Background", key="background_color")
-    stair_color = st.color_picker("Stairs", key="stair_color")
-    handrail_color = st.color_picker("Handrail", key="handrail_color")
+    col_bg, col_st, col_hr = st.columns(3)
+    background_color = col_bg.color_picker("BG", key="background_color")
+    stair_color = col_st.color_picker("Stairs", key="stair_color")
+    handrail_color = col_hr.color_picker("Rail", key="handrail_color")
 
-    st.markdown("---")
     st.subheader("Viewer")
     viewer_mode = st.radio(
         "Render mode",
         options=["Face colors", "Wireframe", "Faces + edges"],
         key="viewer_mode",
     )
+    if viewer_mode == "Faces + edges":
+        edge_width = st.slider("Edge width", min_value=1, max_value=8, key="edge_width")
+    else:
+        edge_width = st.session_state["edge_width"]
     projection_type = st.selectbox(
         "Projection",
         options=["perspective", "orthographic"],
         key="projection_type",
     )
     fisheye_strength = st.slider(
-        "Fisheye", min_value=0.0, max_value=1.0, step=0.05, key="fisheye_strength"
+        "Fisheye distortion", min_value=0.0, max_value=1.0, step=0.05, key="fisheye_strength",
+        help="0 = off. Adds barrel distortion for a wide-angle lens effect.",
     )
-    st.markdown("Lighting")
-    ambient = st.slider("Ambient", min_value=0.0, max_value=1.0, step=0.05, key="ambient")
-    diffuse = st.slider("Diffuse", min_value=0.0, max_value=1.0, step=0.05, key="diffuse")
-    specular = st.slider("Specular", min_value=0.0, max_value=1.0, step=0.05, key="specular")
-    roughness = st.slider("Roughness", min_value=0.0, max_value=1.0, step=0.05, key="roughness")
-    edge_width = st.slider("Edge width", min_value=1, max_value=8, key="edge_width")
+    show_axis_guide = st.checkbox(
+        "Show orientation guide", key="show_axis_guide",
+        help="Displays an XYZ axis reference below the main viewer.",
+    )
 
-    st.markdown("---")
-    show_axis_guide = st.checkbox("Show orientation guide", key="show_axis_guide")
-    st.markdown("---")
-    st.write("Export")
+    with st.expander("Lighting", expanded=False):
+        ambient = st.slider(
+            "Ambient", min_value=0.0, max_value=1.0, step=0.05, key="ambient",
+            help="Baseline light on all surfaces.",
+        )
+        diffuse = st.slider(
+            "Diffuse", min_value=0.0, max_value=1.0, step=0.05, key="diffuse",
+            help="Directional light contribution.",
+        )
+        specular = st.slider(
+            "Specular", min_value=0.0, max_value=1.0, step=0.05, key="specular",
+            help="Shininess highlight intensity.",
+        )
+        roughness = st.slider(
+            "Roughness", min_value=0.0, max_value=1.0, step=0.05, key="roughness",
+            help="Surface roughness — higher = more matte.",
+        )
 
 params = {
     "step_count": step_count,
@@ -165,12 +270,15 @@ params = {
     "step_depth": step_depth,
     "bottom_extension": bottom_extension,
     "top_extension": top_extension,
+    "rail_bottom_ext": rail_bottom_ext,
+    "rail_top_ext": rail_top_ext,
     "enable_handrail": enable_handrail,
     "handrail_style": handrail_type,
     "rail_placement": rail_placement.lower(),
-    "support_count": support_count,
+    "pole_density": pole_density,
     "stair_color": stair_color,
     "handrail_color": handrail_color,
+    "landings": landings,
 }
 
 viewer_mode_map = {
@@ -265,16 +373,16 @@ if show_axis_guide:
 obj_bytes = export_obj(mesh_parts).encode("utf-8")
 json_bytes = export_json(params).encode("utf-8")
 
-col1, col2 = st.columns(2)
-col1.download_button("Download OBJ", obj_bytes, file_name="stairset.obj", mime="text/plain")
-col2.download_button(
-    "Download config JSON", json_bytes,
-    file_name="stairset-config.json", mime="application/json",
-)
-
-with st.expander("Parameters (JSON)"):
-    st.json(params)
-
-with st.expander("Preset URL"):
-    st.write("Share or embed these exact parameters:")
-    st.code(_preset_url())
+with st.sidebar:
+    with st.expander("Export & Share", expanded=False):
+        col_e1, col_e2 = st.columns(2)
+        col_e1.download_button(
+            "OBJ", obj_bytes, file_name="stairset.obj", mime="text/plain",
+            use_container_width=True,
+        )
+        col_e2.download_button(
+            "JSON", json_bytes, file_name="stairset-config.json", mime="application/json",
+            use_container_width=True,
+        )
+        st.caption("Preset URL (copy to share):")
+        st.code(_preset_url(), language=None)

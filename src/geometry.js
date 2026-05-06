@@ -42,27 +42,48 @@ export function buildStairset(params) {
     }
 
     if (enableHandrail) {
-        const railHeight = 0.92;
+        const handRailClearance = 0.9;
         const railRadius = 0.025;
-        const railLength = currentDepth - 0.02;
-        const rail = new THREE.Mesh(
-            new THREE.CylinderGeometry(railRadius, railRadius, railLength, 16),
-            railMaterial
-        );
-        rail.rotation.z = Math.PI / 2;
-        rail.position.set(stepWidth - 0.05, railHeight, railLength / 2 - 0.02);
-        group.add(rail);
 
-        const postCount = Math.max(2, Math.ceil(currentDepth / 0.8));
-        for (let i = 0; i < postCount; i += 1) {
-            const normalized = i / (postCount - 1);
-            const postDepth = normalized * railLength;
+        // Collect one post per step, centered on each tread
+        const postData = [];
+        let depthAccum = 0;
+        for (let i = 0; i < stepCount; i += 1) {
+            const treadTopY = i * stepHeight + 0.04;
+            const postZ = depthAccum + stepDepth / 2;
+            postData.push({ z: postZ, footY: treadTopY, topY: treadTopY + handRailClearance });
+            depthAccum += stepDepth;
+            if (i + 1 === actualLandingIndex) {
+                depthAccum += landingDepth;
+            }
+        }
+
+        // Add vertical posts whose feet sit on each tread surface
+        for (const p of postData) {
             const post = new THREE.Mesh(
-                new THREE.CylinderGeometry(0.03, 0.03, railHeight, 12),
+                new THREE.CylinderGeometry(0.03, 0.03, handRailClearance, 12),
                 railMaterial
             );
-            post.position.set(stepWidth - 0.05, railHeight / 2, postDepth);
+            post.position.set(stepWidth - 0.05, p.footY + handRailClearance / 2, p.z);
             group.add(post);
+        }
+
+        // Add slanted rail connecting first post top to last post top
+        if (postData.length >= 2) {
+            const first = postData[0];
+            const last = postData[postData.length - 1];
+            const start = new THREE.Vector3(stepWidth - 0.05, first.topY, first.z);
+            const end = new THREE.Vector3(stepWidth - 0.05, last.topY, last.z);
+            const mid = new THREE.Vector3().lerpVectors(start, end, 0.5);
+            const dir = new THREE.Vector3().subVectors(end, start);
+            const railLen = dir.length();
+            const rail = new THREE.Mesh(
+                new THREE.CylinderGeometry(railRadius, railRadius, railLen, 16),
+                railMaterial
+            );
+            rail.position.copy(mid);
+            rail.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+            group.add(rail);
         }
     }
 

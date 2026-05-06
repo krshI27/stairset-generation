@@ -298,9 +298,12 @@ def build_stair_mesh_parts(
     enable_handrail=True,
     handrail_style="Metal",
     rail_placement="side",
-    support_count=4,
+    pole_density=0.3,
     stair_color="#cccccc",
     handrail_color="#404040",
+    landings=None,
+    rail_bottom_ext=True,
+    rail_top_ext=True,
 ):
     """Linear staircase: each step i is a cumulative block (i+1)*step_height tall,
     step_depth wide, step_width across. Steps ascend in Y and Z."""
@@ -312,15 +315,45 @@ def build_stair_mesh_parts(
     bottom_extension = max(0.0, float(bottom_extension))
     top_extension = max(0.0, float(top_extension))
 
+    # Per-step Y offset accumulated from landings that precede each step
+    if landings is None:
+        landings = []
+    landings_sorted = sorted(
+        [l for l in landings if isinstance(l, dict) and 0 < int(l["after_step"]) < step_count],
+        key=lambda l: int(l["after_step"]),
+    )
+    y_extra = [0.0] * step_count
+    _accum = 0.0
+    _li = 0
+    for _i in range(step_count):
+        while _li < len(landings_sorted) and int(landings_sorted[_li]["after_step"]) <= _i:
+            _accum += float(landings_sorted[_li]["depth"])
+            _li += 1
+        y_extra[_i] = _accum
+
     for i in range(step_count):
-        y_front = float(i) * step_depth - (bottom_extension if i == 0 else 0.0)
-        y_back = float(i + 1) * step_depth + (top_extension if i == step_count - 1 else 0.0)
+        y_front = float(i) * step_depth + y_extra[i] - (bottom_extension if i == 0 else 0.0)
+        y_back = float(i + 1) * step_depth + y_extra[i] + (top_extension if i == step_count - 1 else 0.0)
         block_h = float(i + 1) * step_height
         verts, faces = build_box(
             step_width, y_back - y_front, block_h,
             (0.0, (y_front + y_back) / 2.0, block_h / 2.0),
         )
         mesh_parts.append({"vertices": verts, "faces": faces, "color": stair_color})
+
+    # Build flat landing geometry (solid boxes from z=0 to landing height)
+    _accum_land_y = 0.0
+    for land in landings_sorted:
+        _after_i = int(land["after_step"])
+        _land_depth = float(land["depth"])
+        _land_y_start = float(_after_i) * step_depth + _accum_land_y
+        _land_h = float(_after_i) * step_height
+        lv, lf = build_box(
+            step_width, _land_depth, _land_h,
+            (0.0, _land_y_start + _land_depth / 2.0, _land_h / 2.0),
+        )
+        mesh_parts.append({"vertices": lv, "faces": lf, "color": stair_color})
+        _accum_land_y += _land_depth
 
     if not enable_handrail:
         return mesh_parts
@@ -338,14 +371,27 @@ def build_stair_mesh_parts(
         curb_height = style["curb_height"]
         cx = 0.0 if rail_placement == "center" else step_width / 2.0 - thickness / 2.0
         for i in range(step_count):
-            y_front = float(i) * step_depth - (bottom_extension if i == 0 else 0.0)
-            y_back = float(i + 1) * step_depth + (top_extension if i == step_count - 1 else 0.0)
+            y_front = float(i) * step_depth + y_extra[i] - (bottom_extension if i == 0 and rail_bottom_ext else 0.0)
+            y_back = float(i + 1) * step_depth + y_extra[i] + (top_extension if i == step_count - 1 and rail_top_ext else 0.0)
             top_z = float(i + 1) * step_height
             lv, lf = build_box(
                 thickness, y_back - y_front, curb_height,
                 (cx, (y_front + y_back) / 2.0, top_z + curb_height / 2.0),
             )
             mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
+        # Add curb sections over each landing
+        _accum_land_y = 0.0
+        for land in landings_sorted:
+            _after_i = int(land["after_step"])
+            _land_depth = float(land["depth"])
+            _land_y_start = float(_after_i) * step_depth + _accum_land_y
+            _top_z = float(_after_i) * step_height
+            lv, lf = build_box(
+                thickness, _land_depth, curb_height,
+                (cx, _land_y_start + _land_depth / 2.0, _top_z + curb_height / 2.0),
+            )
+            mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
+            _accum_land_y += _land_depth
         return mesh_parts
 
     # Round / Square / Metal
@@ -356,20 +402,35 @@ def build_stair_mesh_parts(
     inset = post_r * 3.0
     rail_x = 0.0 if rail_placement == "center" else step_width / 2.0 - inset
 
-    # Keypoints: at each step nosing (front edge of tread) at rail_height above tread
+    # Keypoints: at each step tread-centre (not nosing) so posts align with the rail.
+    # Using tread centres also guarantees that landing-end Y and the first
+    # post-landing step's tread-centre Y are offset by step_depth/2, which
+    # removes the degenerate vertical segment that appeared at landing transitions.
+    _landing_by_after = {int(l["after_step"]): l for l in landings_sorted}
     keypoints = []
-    if bottom_extension > 0.0:
+    if bottom_extension > 0.0 and rail_bottom_ext:
         keypoints.append(np.array([rail_x, -bottom_extension, step_height + rail_height]))
     for i in range(step_count):
+        nosing_y = float(i) * step_depth + y_extra[i]
+        tread_center_y = nosing_y + step_depth / 2.0
+        nosing_z = float(i + 1) * step_height + rail_height
+        keypoints.append(np.array([rail_x, tread_center_y, nosing_z]))
+        # After this step, insert a flat landing rail segment if a landing follows.
+        # The landing_start keypoint has the same Z as the last tread-centre keypoint
+        # (flat transition), and landing_end is step_depth/2 before the next tread
+        # centre, so there is no duplicate-Y vertical segment.
+        _after_key = i + 1
+        if _after_key in _landing_by_after and _after_key < step_count:
+            _land = _landing_by_after[_after_key]
+            _land_z = float(i + 1) * step_height + rail_height
+            _y_land_start = float(i + 1) * step_depth + y_extra[i]
+            _y_land_end = _y_land_start + float(_land["depth"])
+            keypoints.append(np.array([rail_x, _y_land_start, _land_z]))
+            keypoints.append(np.array([rail_x, _y_land_end, _land_z]))
+    if top_extension > 0.0 and rail_top_ext:
         keypoints.append(np.array([
             rail_x,
-            float(i) * step_depth,
-            float(i + 1) * step_height + rail_height,
-        ]))
-    if top_extension > 0.0:
-        keypoints.append(np.array([
-            rail_x,
-            float(step_count) * step_depth + top_extension,
+            float(step_count) * step_depth + y_extra[step_count - 1] + top_extension,
             float(step_count) * step_height + rail_height,
         ]))
     keypoints = np.array(keypoints)
@@ -402,15 +463,54 @@ def build_stair_mesh_parts(
             rv, rf = build_oriented_box(rail_w, rail_w, seg_len, tuple(ctr), seg)
         mesh_parts.append({"vertices": rv, "faces": rf, "color": handrail_color})
 
-    # Posts evenly distributed across step nosings
-    post_idxs = np.unique(
-        np.round(np.linspace(0, step_count - 1, min(support_count, step_count))).astype(int)
-    )
+    # --- Smart density-based post placement ---
+    # Build a list of "runs": contiguous step ranges between landings.
+    # run = (first_step_idx, last_step_idx)
+    runs = []
+    run_start = 0
+    for land in landings_sorted:
+        run_end = int(land["after_step"]) - 1
+        if run_end >= run_start:
+            runs.append((run_start, run_end))
+        run_start = int(land["after_step"])
+    runs.append((run_start, step_count - 1))
+
+    # Mandatory posts: first and last step of every run, plus
+    # the step just before and just after every landing.
+    mandatory = set()
+    for r_start, r_end in runs:
+        mandatory.add(r_start)
+        mandatory.add(r_end)
+
+    # Optional posts: filled in by recursive bisection of each run, ordered
+    # by priority (root first, then children).  We collect them as a flat
+    # priority-ordered list per run so we can truncate at the desired count.
+    def _bisect_priority(lo, hi, result):
+        """Add the midpoint of [lo, hi] (inclusive) to result, then recurse."""
+        if hi <= lo:
+            return
+        mid = (lo + hi) // 2  # lower middle for even-length spans
+        result.append(mid)
+        _bisect_priority(lo, mid - 1, result)
+        _bisect_priority(mid + 1, hi, result)
+
+    optional_ordered = []  # priority-ordered list of optional step indices
+    for r_start, r_end in runs:
+        inner_lo = r_start + 1
+        inner_hi = r_end - 1
+        if inner_hi >= inner_lo:
+            _bisect_priority(inner_lo, inner_hi, optional_ordered)
+
+    # Clamp density to [0, 1] and compute how many optional posts to include.
+    density = float(max(0.0, min(1.0, pole_density)))
+    n_optional = round(density * len(optional_ordered))
+    chosen = mandatory | set(optional_ordered[:n_optional])
+
     vertical = np.array([0.0, 0.0, 1.0])
-    for i in post_idxs:
-        nosing_y = float(i) * step_depth
+    for i in sorted(chosen):
+        nosing_y = float(i) * step_depth + y_extra[i]
         tread_z = float(i + 1) * step_height
-        post_ctr = (rail_x, nosing_y, tread_z + rail_height / 2.0)
+        post_ctr = (rail_x, nosing_y + step_depth / 2.0, tread_z + rail_height / 2.0)
         if is_round:
             pv, pf = build_oriented_cylinder(post_r, rail_height, post_ctr, vertical, segments=12)
         else:
