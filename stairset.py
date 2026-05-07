@@ -2,7 +2,6 @@ import json
 from typing import Optional
 
 import numpy as np
-from vectorlab import fisheye_vertex as _vectorlab_fisheye
 
 
 def build_box(width, height, depth, center):
@@ -241,12 +240,6 @@ def build_cylinder(radius, height, center, segments=16):
     return vertices, np.array(faces, dtype=int)
 
 
-def apply_fisheye(vertices, strength=0.0, center=None):
-    if strength <= 0.0:
-        return vertices
-    return _vectorlab_fisheye(vertices, strength=strength, center=center)
-
-
 def subdivide_mesh(vertices, faces, levels=2):
     """Recursively split each triangle into 4 sub-triangles via edge midpoints.
 
@@ -330,14 +323,12 @@ def _world_centroid_and_scale(mesh_parts):
 def build_plotly_meshes(
     mesh_parts,
     viewer_mode="faces",
-    fisheye_strength=0.0,
     edge_width=2,
     ambient=0.6,
     diffuse=0.8,
     specular=0.3,
     roughness=0.5,
     explode_factor=0.0,
-    fisheye_subdivide_levels=None,
     projection_type="perspective",
     light_position=None,
 ):
@@ -346,19 +337,6 @@ def build_plotly_meshes(
     traces = []
     world_c, world_scale = _world_centroid_and_scale(mesh_parts)
 
-    if fisheye_subdivide_levels is None:
-        if fisheye_strength <= 0.0:
-            sub_levels = 0
-        elif fisheye_strength < 0.4:
-            sub_levels = 2
-        elif fisheye_strength < 0.7:
-            sub_levels = 3
-        else:
-            sub_levels = 4
-    else:
-        sub_levels = int(fisheye_subdivide_levels)
-
-    fisheye_center_xz = (float(world_c[0]), float(world_c[2]))
     explode_scale = world_scale * 0.15
 
     # Light positioned relative to world centroid + user-provided XYZ offset
@@ -383,12 +361,6 @@ def build_plotly_meshes(
 
         if explode_factor > 0.0:
             vertices, faces = explode_per_face(vertices, faces, explode_factor, explode_scale)
-
-        if sub_levels > 0:
-            vertices, faces = subdivide_mesh(vertices, faces, levels=sub_levels)
-
-        if fisheye_strength > 0.0:
-            vertices = apply_fisheye(vertices, fisheye_strength, center=fisheye_center_xz)
 
         color = part.get("color", "#999999")
 
@@ -650,10 +622,10 @@ def build_stair_mesh_parts(
         run_start = int(land["after_step"])
     runs.append((run_start, step_count - 1))
 
-    step_priority = {0: 0.0, step_count - 1: 0.0}
+    # Anchor steps: first, last, and run-transition ends — always visible.
+    anchor_set = {0, step_count - 1}
     for run_idx in range(len(runs) - 1):
-        r_end = runs[run_idx][1]
-        step_priority.setdefault(r_end, 0.5)
+        anchor_set.add(runs[run_idx][1])
 
     def _bisect_list(arr, lo, hi, result):
         if hi < lo:
@@ -665,15 +637,19 @@ def build_stair_mesh_parts(
 
     inner_ordered = []
     for r_start, r_end in runs:
-        inner = [i for i in range(r_start, r_end + 1) if i not in step_priority]
+        inner = [i for i in range(r_start, r_end + 1) if i not in anchor_set]
         if inner:
             ordered = []
             _bisect_list(inner, 0, len(inner) - 1, ordered)
             inner_ordered.extend(ordered)
 
+    # Spread priorities uniformly across [0, 1] so every step on the slider
+    # adds at least one post. Anchors share 0.0 (always shown); inner steps
+    # fill (0, 1] in bisection order so the most central post appears first.
+    step_priority = {i: 0.0 for i in anchor_set}
     n_inner = len(inner_ordered)
     for rank, step_i in enumerate(inner_ordered):
-        step_priority[step_i] = 0.5 + 0.5 * (rank + 1) / n_inner if n_inner else 0.5
+        step_priority[step_i] = (rank + 1) / (n_inner + 1)
 
     landing_end_posts = []
     for land in landings_sorted:
@@ -768,14 +744,13 @@ def build_stair_mesh_parts(
                 pv, pf = build_box(post_r * 2.0, post_r * 2.0, rail_height, post_ctr)
             mesh_parts.append({"vertices": pv, "faces": pf, "color": handrail_color})
 
-        if density >= 0.5:
-            for (_y_land_end, _land_surface_z) in landing_end_posts:
-                post_ctr = (rail_x, _y_land_end, _land_surface_z + rail_height / 2.0)
-                if is_round:
-                    pv, pf = build_oriented_cylinder(post_r, rail_height, post_ctr, vertical, segments=12)
-                else:
-                    pv, pf = build_box(post_r * 2.0, post_r * 2.0, rail_height, post_ctr)
-                mesh_parts.append({"vertices": pv, "faces": pf, "color": handrail_color})
+        for (_y_land_end, _land_surface_z) in landing_end_posts:
+            post_ctr = (rail_x, _y_land_end, _land_surface_z + rail_height / 2.0)
+            if is_round:
+                pv, pf = build_oriented_cylinder(post_r, rail_height, post_ctr, vertical, segments=12)
+            else:
+                pv, pf = build_box(post_r * 2.0, post_r * 2.0, rail_height, post_ctr)
+            mesh_parts.append({"vertices": pv, "faces": pf, "color": handrail_color})
 
     return mesh_parts
 
@@ -819,18 +794,6 @@ def _faces_to_pyvista(faces: np.ndarray) -> np.ndarray:
     return out.ravel()
 
 
-def _resolve_sub_levels(fisheye_strength: float, override: Optional[int]) -> int:
-    if override is not None:
-        return int(override)
-    if fisheye_strength <= 0.0:
-        return 0
-    if fisheye_strength < 0.4:
-        return 2
-    if fisheye_strength < 0.7:
-        return 3
-    return 4
-
-
 def build_pyvista_plotter(
     mesh_parts,
     *,
@@ -839,29 +802,14 @@ def build_pyvista_plotter(
     viewer_mode: str = "faces",
     edge_color: str = "#222222",
     edge_width: int = 2,
-    ambient: float = 0.3,
-    diffuse: float = 0.7,
-    specular: float = 0.3,
-    specular_power: float = 20.0,
-    fisheye_strength: float = 0.0,
-    fisheye_subdivide_levels: Optional[int] = None,
-    projection_type: str = "perspective",
-    light_position=(4.0, -8.0, 12.0),
-    light_intensity: float = 1.0,
-    spotlight_enabled: bool = False,
-    spotlight_cone_angle: float = 30.0,
     camera_position=None,
-    camera_azimuth: float = -45.0,
-    camera_elevation: float = 30.0,
-    camera_zoom: float = 1.0,
     off_screen: bool = False,
 ):
     """Build a configured pyvista Plotter for the stair scene.
 
-    `mesh_parts` is the output of `build_stair_mesh_parts`. Lighting params map
-    directly to VTK's Phong shader. `light_position` is in world_scale units
-    relative to the model centroid — same convention as the Plotly path so
-    presets translate. Set `spotlight_enabled=True` to attach a VTK spot light.
+    `mesh_parts` is the output of `build_stair_mesh_parts`. Lighting is fixed
+    (key + fill scene light, mid Phong shading) so the app stays simple — for
+    final renders, export the OBJ to Blender / Unreal.
     """
     import pyvista as pv
 
@@ -869,8 +817,6 @@ def build_pyvista_plotter(
     plotter.background_color = background_color
 
     world_c, world_scale = _world_centroid_and_scale(mesh_parts)
-    sub_levels = _resolve_sub_levels(fisheye_strength, fisheye_subdivide_levels)
-    fisheye_center_xz = (float(world_c[0]), float(world_c[2]))
 
     show_faces = viewer_mode in ("faces", "faces+edges")
     show_edges = viewer_mode in ("wireframe", "faces+edges")
@@ -878,11 +824,6 @@ def build_pyvista_plotter(
     for part in mesh_parts:
         verts = part["vertices"]
         faces = part["faces"]
-        if sub_levels > 0:
-            verts, faces = subdivide_mesh(verts, faces, levels=sub_levels)
-        if fisheye_strength > 0.0:
-            verts = apply_fisheye(verts, fisheye_strength, center=fisheye_center_xz)
-
         mesh = pv.PolyData(np.asarray(verts, dtype=float), _faces_to_pyvista(faces))
         color = part.get("color", "#999999")
 
@@ -893,10 +834,10 @@ def build_pyvista_plotter(
                 opacity=1.0,
                 smooth_shading=False,
                 lighting=True,
-                ambient=ambient,
-                diffuse=diffuse,
-                specular=specular,
-                specular_power=specular_power,
+                ambient=0.4,
+                diffuse=0.8,
+                specular=0.2,
+                specular_power=30.0,
                 show_edges=(viewer_mode == "faces+edges"),
                 edge_color=edge_color,
                 line_width=edge_width,
@@ -910,62 +851,29 @@ def build_pyvista_plotter(
                 lighting=False,
             )
 
-    # Lighting: a key directional light at the user-positioned point + a
-    # softer fill light from the opposite side so unlit faces still read.
-    lx, ly, lz = light_position
     key_pos = (
-        world_c[0] + world_scale * float(lx),
-        world_c[1] + world_scale * float(ly),
-        world_c[2] + world_scale * float(lz),
+        world_c[0] + world_scale * 4.0,
+        world_c[1] + world_scale * -8.0,
+        world_c[2] + world_scale * 12.0,
     )
     fill_pos = (
-        world_c[0] - world_scale * float(lx) * 0.6,
-        world_c[1] - world_scale * float(ly) * 0.6,
-        world_c[2] + world_scale * abs(float(lz)) * 0.4,
+        world_c[0] + world_scale * -2.4,
+        world_c[1] + world_scale * 4.8,
+        world_c[2] + world_scale * 4.8,
     )
-    if spotlight_enabled:
-        key_light = pv.Light(
-            position=key_pos,
-            focal_point=tuple(world_c),
-            color="white",
-            intensity=float(light_intensity),
-            light_type="scene light",
-        )
-        key_light.positional = True
-        key_light.cone_angle = float(spotlight_cone_angle)
-        key_light.exponent = 1.0  # soft falloff at cone edge
-        plotter.add_light(key_light)
-        # Dim fill so the spot shadow is visible.
-        fill_intensity = 0.05
-    else:
-        plotter.add_light(
-            pv.Light(
-                position=key_pos,
-                focal_point=tuple(world_c),
-                color="white",
-                intensity=float(light_intensity),
-                light_type="scene light",
-            )
-        )
-        fill_intensity = 0.35
-    plotter.add_light(
-        pv.Light(
-            position=fill_pos,
-            focal_point=tuple(world_c),
-            color="white",
-            intensity=fill_intensity,
-            light_type="scene light",
-        )
-    )
+    plotter.add_light(pv.Light(position=key_pos, focal_point=tuple(world_c),
+                               color="white", intensity=1.0, light_type="scene light"))
+    plotter.add_light(pv.Light(position=fill_pos, focal_point=tuple(world_c),
+                               color="white", intensity=0.35, light_type="scene light"))
 
     if camera_position is not None:
         plotter.camera_position = camera_position
     else:
         import math as _math
-        _az = _math.radians(float(camera_azimuth))
-        _el = _math.radians(float(camera_elevation))
-        # 2.44 ≈ sqrt(1.5²+1.5²+1.2²) — base distance that matches prior default.
-        _dist = float(camera_zoom) * world_scale * 2.44
+        # Default 3/4 view: -45° azimuth, 30° elevation, dist scaled to bbox.
+        _az = _math.radians(-45.0)
+        _el = _math.radians(30.0)
+        _dist = world_scale * 2.44
         focal = tuple(world_c)
         eye = (
             world_c[0] + _dist * _math.cos(_el) * _math.cos(_az),
@@ -975,20 +883,57 @@ def build_pyvista_plotter(
         plotter.camera_position = [eye, focal, (0.0, 0.0, 1.0)]
         plotter.reset_camera_clipping_range()
 
-    # Set projection AFTER camera is configured so it survives any camera reset.
-    plotter.parallel_projection = str(projection_type).lower().startswith("ortho")
-
+    plotter.render()
     return plotter
 
 
-def screenshot_png(plotter, window_size=None, transparent: bool = False) -> bytes:
-    """Render the plotter to PNG bytes at the requested window_size."""
+def embed_lsb_payload(img: np.ndarray, payload: bytes) -> np.ndarray:
+    """Embed `payload` into the LSBs of an RGB image.
+
+    Layout: 4-byte big-endian length header, then payload bytes. One payload
+    bit per channel value (R/G/B), scanline order. Raises if payload too big.
+    """
+    flat = np.ascontiguousarray(img[..., :3]).reshape(-1).copy()
+    blob = len(payload).to_bytes(4, "big") + payload
+    bits = np.unpackbits(np.frombuffer(blob, dtype=np.uint8))
+    if bits.size > flat.size:
+        raise ValueError(f"payload too large: {bits.size} bits > {flat.size} channels")
+    flat[: bits.size] = (flat[: bits.size] & 0xFE) | bits
+    out = img.copy()
+    out[..., :3] = flat.reshape(img.shape[0], img.shape[1], 3)
+    return out
+
+
+def extract_lsb_payload(img: np.ndarray) -> bytes:
+    """Inverse of `embed_lsb_payload`. Reads 4-byte length header then payload."""
+    flat = np.ascontiguousarray(img[..., :3]).reshape(-1)
+    header_bits = (flat[:32] & 1).astype(np.uint8)
+    length = int.from_bytes(np.packbits(header_bits).tobytes(), "big")
+    total_bits = 32 + length * 8
+    if total_bits > flat.size:
+        raise ValueError("declared payload exceeds image capacity")
+    body_bits = (flat[32:total_bits] & 1).astype(np.uint8)
+    return np.packbits(body_bits).tobytes()
+
+
+def screenshot_png(
+    plotter,
+    window_size=None,
+    transparent: bool = False,
+    payload: Optional[bytes] = None,
+) -> bytes:
+    """Render the plotter to PNG bytes at the requested window_size.
+
+    If `payload` is given, embed it via LSB steganography in the RGB channels.
+    """
     import io
     img = plotter.screenshot(
         transparent_background=transparent,
         return_img=True,
         window_size=list(window_size) if window_size is not None else None,
     )
+    if payload:
+        img = embed_lsb_payload(img, payload)
     from PIL import Image
     buf = io.BytesIO()
     Image.fromarray(img).save(buf, format="PNG")

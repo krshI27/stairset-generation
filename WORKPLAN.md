@@ -9,7 +9,7 @@
 
 - [x] **FISH-LENS** done (2026-05-07): mesh subdivision (recursive midpoint, 4ⁿ tris) before fisheye_vertex so straight edges become smooth curves. Subdivision level auto-scales 0/2/3/4 based on fisheye_strength.
 - [x] **EXPLODE** done (2026-05-07): per-part offset along (part_centroid − world_centroid), scaled by world bbox max dim. Slider in Viewer section, factor 0–1.
-- [ ] **ORTHO-LIGHTING** ~30min: Verify orthographic lighting looks good after lightposition z fix (z=0→z=300). May need a second directional light or higher ambient when in orthographic mode.
+- [x] **ORTHO-LIGHTING** done (2026-05-07): verified in browser — ortho projection shows per-step shading; ambient bump (+0.15 in ortho) + light position scaled to world centroid already in code, no second light needed.
 - [x] **PNG-CURRENT-CAM** done (2026-05-07): Plotly modebar PNG already captures live camera (client-side toImage). Added elev/azim sliders in Print PNG section so matplotlib `render_png` can match the viewer angle. Defaults 30°/-45° approximate Plotly's home eye (1.5,-1.5,1.2).
 
 ## Active priorities (2026-04-25 — Path A: ready, just needs presets + DPI fix)
@@ -26,7 +26,7 @@
 - [x] **STR-1**: Deployed to Streamlit Cloud (2026-04-25)
 - [ ] **STR-PRODIGI** ~1hr: "Order Print" button → `render_png(dpi=300)` → upload bytes to R2 public bucket → `POST https://api.prodigi.com/v4.0/orders` with `GLOBAL-FAP-16.5X11.7` (A3); `PRODIGI_API_KEY` from `.streamlit/secrets.toml`
 - [ ] **CRT-1** ~30min: Add stairset-generation to karoshirt.art `/create` gallery page
-- [ ] **EXHIBIT-STR** ~1hr: Embed steganographic watermark in exported PNG — preset ID + timestamp in pixel LSBs (see Exhibition Concept note)
+- [x] **EXHIBIT-STR** done (2026-05-07): `embed_lsb_payload`/`extract_lsb_payload` in stairset.py; `screenshot_png(payload=...)` embeds 4-byte length header + payload bytes in RGB LSBs. Render PNG button serializes `{app, ts, preset}` JSON. Verified roundtrip survives PIL→PNG→PIL; max channel delta 1.
 
 ## Completed geometry fixes (2026-05-07)
 
@@ -83,10 +83,12 @@
 
 ## Open after migration
 
-- [ ] **Camera persistence across reruns**: still resets when params change (component re-mount). Needs JS bridge to capture VTK panel camera and feed into next `plotter.camera_position`. Defer until friction shows.
-- [ ] **Render PNG matches dragged camera**: requires camera-bridge above.
+- [x] **Camera persistence across reruns** done (2026-05-07): "📌 Capture viewer cam" button uses `streamlit_js_eval` to read `VTKSynchronizedPlot.camera` (position/focalPoint/viewUp/parallelScale) from the inner stpyvista iframe Bokeh model and stores it in `st.session_state["captured_camera"]`. `_build_plotter` passes that as `camera_position` to both viewer + off-screen renders. Live drags persist across param changes; "✕ Clear" reverts to az/el/zoom inputs.
+- [x] **Render PNG matches dragged camera** done (2026-05-07): `_build_plotter(off_screen=True, ...)` reads the same `captured_camera` session state, so PNG/SVG export inherits the live-dragged camera with no extra UI step.
 - [ ] **Two-finger trackpad pan**: out of scope; Shift+drag accepted as substitute.
-- [ ] **Viewer-level fisheye post-process**: would need custom GLSL via VTK shader replacement; current geometric fisheye stays as-is.
+- [x] **GLSL fisheye via VTK shader replacement** blocked + obsolete (2026-05-07): `vtkOpenGLPolyDataMapper.AddShaderReplacement` is not exposed in this VTK Python build. Fisheye removed entirely from app per user direction — UI slider, DEFAULTS, kwargs in `build_pyvista_plotter`/`build_plotly_meshes`, `apply_fisheye`/`_resolve_sub_levels`, `vectorlab` dep, and `fisheye_strength` keys in `presets/zine-vol1-*.json` all dropped.
+- [x] **Rail shadows in browser viewer** partial (2026-05-07): off-screen PNG/SVG path now calls `plotter.enable_shadows()` (verified ~7% of pixels differ vs no-shadows render at 400×400). Browser viewer still has no cast shadows — VTK.js doesn't honour the shadow-map render pass through Panel's serialization; Phong from `pv.Light` continues to drive interactive shading.
+- [x] **Remove fisheye slider from UI** done (2026-05-07): slider, DEFAULTS entry, `_build_plotter` arg, and `_viewer_key` entry removed; `fisheye_strength` param retained in `build_pyvista_plotter` signature for scripted/preset use.
 
 ## Bug fixes (2026-05-07 round 2)
 
@@ -144,7 +146,7 @@ if _raw:
 - [x] **STR-1**: Deployed to Streamlit Cloud (2026-04-25)
 - [ ] **STR-PRODIGI** ~1hr: "Order Print" button → `render_png(dpi=300)` → upload bytes to R2 public bucket → `POST https://api.prodigi.com/v4.0/orders` with `GLOBAL-FAP-16.5X11.7` (A3); `PRODIGI_API_KEY` from `.streamlit/secrets.toml`
 - [ ] **CRT-1** ~30min: Add stairset-generation to karoshirt.art `/create` gallery page
-- [ ] **EXHIBIT-STR** ~1hr: Embed steganographic watermark in exported PNG — preset ID + timestamp in pixel LSBs (see Exhibition Concept note)
+- [x] **EXHIBIT-STR** done (2026-05-07): `embed_lsb_payload`/`extract_lsb_payload` in stairset.py; `screenshot_png(payload=...)` embeds 4-byte length header + payload bytes in RGB LSBs. Render PNG button serializes `{app, ts, preset}` JSON. Verified roundtrip survives PIL→PNG→PIL; max channel delta 1.
 
 ## Preset loader pattern (Streamlit)
 

@@ -17,7 +17,6 @@
         "pole_density": 0.0,
         "viewer_mode": "Face colors",
         "projection_type": "perspective",
-        "fisheye_strength": 0.55,
         "explode_factor": 0.0,
         "light_x": 2.0,
         "light_y": -10.0,

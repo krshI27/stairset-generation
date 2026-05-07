@@ -4,6 +4,7 @@ import sys
 import urllib.parse
 
 import streamlit as st
+from streamlit_js_eval import streamlit_js_eval
 
 # pyvista needs xvfb on headless Linux (Streamlit Cloud); harmless on macOS/Win.
 import pyvista as pv
@@ -32,6 +33,28 @@ def _cached_mesh_parts(params_json: str):
     params. Cache by JSON-serialised params; falls through to a fresh build on
     miss. Returned dict is treated read-only by all callers."""
     return build_stair_mesh_parts(**json.loads(params_json))
+
+
+_CAM_CAPTURE_JS = (
+    "(() => { try {"
+    "  const outer = window.parent.document.querySelector('iframe[title^=\"stpyvista\"]');"
+    "  if (!outer) return {error:'no outer'};"
+    "  const inner = outer.contentDocument && outer.contentDocument.getElementById('stpyvistaframe');"
+    "  if (!inner) return {error:'no inner'};"
+    "  const win = inner.contentWindow;"
+    "  if (!win || !win.Bokeh) return {error:'no Bokeh'};"
+    "  for (const d of win.Bokeh.documents) {"
+    "    const all = d._all_models;"
+    "    for (const [id, m] of (all.entries ? all.entries() : Object.entries(all))) {"
+    "      if (m && m.camera && m.camera.position) {"
+    "        const c = m.camera;"
+    "        return {position: c.position, focal_point: c.focalPoint, up: c.viewUp, parallel_scale: c.parallelScale};"
+    "      }"
+    "    }"
+    "  }"
+    "  return {error:'no camera model'};"
+    "} catch(e) { return {error: String(e)}; } })()"
+)
 
 st.set_page_config(
     page_title="Stairset Generator",
@@ -69,21 +92,6 @@ DEFAULTS = {
     "rail_placement": "Right",
     "pole_density": 0.3,
     "viewer_mode": "Face colors",
-    "projection_type": "perspective",
-    "fisheye_strength": 0.0,
-    "camera_azimuth": -45.0,
-    "camera_elevation": 30.0,
-    "camera_zoom": 1.0,
-    "light_x": 4.0,
-    "light_y": -8.0,
-    "light_z": 12.0,
-    "light_intensity": 1.0,
-    "spotlight_enabled": False,
-    "spotlight_cone_angle": 30.0,
-    "ambient": 0.6,
-    "diffuse": 0.8,
-    "specular": 0.3,
-    "roughness": 0.5,
     "edge_width": 2,
     "background_color": "#808080",
     "stair_color": "#cccccc",
@@ -160,18 +168,9 @@ with st.sidebar:
         key="run_pattern",
     )
     col_w, col_h, col_d = st.columns(3)
-    step_width = col_w.number_input(
-        "Width", min_value=0.2, max_value=5.0, step=0.05, key="step_width",
-        help="Step width in metres",
-    )
-    step_height = col_h.number_input(
-        "Height", min_value=0.05, max_value=0.4, step=0.01, key="step_height",
-        help="Riser height in metres",
-    )
-    step_depth = col_d.number_input(
-        "Depth", min_value=0.1, max_value=1.5, step=0.01, key="step_depth",
-        help="Tread depth in metres",
-    )
+    step_width = col_w.number_input("Width m", 0.2, 5.0, step=0.05, key="step_width")
+    step_height = col_h.number_input("Riser m", 0.05, 0.4, step=0.01, key="step_height")
+    step_depth = col_d.number_input("Tread m", 0.1, 1.5, step=0.01, key="step_depth")
     # Pre-parse to decide whether to show landing depth widget
     _pre_count, _pre_landings = _parse_run_pattern(
         run_pattern, st.session_state.get("landing_depth", DEFAULTS["landing_depth"])
@@ -195,46 +194,32 @@ with st.sidebar:
             st.warning("Invalid — enter e.g. `8` or `3 5`")
 
     with st.expander("Extensions", expanded=False):
+        st.caption("Flat platform added before step 1 / after last step.")
         bottom_extension = st.number_input(
-            "Bottom (m)", min_value=0.0, max_value=3.0, step=0.05, key="bottom_extension",
-            help="Flat platform added before step 1",
+            "Bottom m", 0.0, 3.0, step=0.05, key="bottom_extension",
         )
-        rail_bottom_ext = st.checkbox(
-            "Rail follows bottom extension",
-            key="rail_bottom_ext",
-            help="When unchecked the handrail stops at the first step nosing.",
-        )
+        rail_bottom_ext = st.checkbox("Rail follows bottom", key="rail_bottom_ext")
         top_extension = st.number_input(
-            "Top (m)", min_value=0.0, max_value=3.0, step=0.05, key="top_extension",
-            help="Flat platform added after the last step",
+            "Top m", 0.0, 3.0, step=0.05, key="top_extension",
         )
-        rail_top_ext = st.checkbox(
-            "Rail follows top extension",
-            key="rail_top_ext",
-            help="When unchecked the handrail stops at the last step nosing.",
-        )
+        rail_top_ext = st.checkbox("Rail follows top", key="rail_top_ext")
 
     st.subheader("Handrail")
     enable_handrail = st.checkbox("Enable handrail", key="enable_handrail")
     if enable_handrail:
         handrail_type = st.selectbox(
-            "Type",
-            options=["Round", "Square", "Curb"],
-            key="handrail_type",
-            help="Round/Square = metal handrail. Curb = concrete/stone ledge.",
+            "Type", ["Round", "Square", "Curb"], key="handrail_type",
+            help="Round/Square = metal rail. Curb = concrete/stone ledge.",
         )
         rail_placement = st.selectbox(
             "Placement",
-            options=["Right", "Left", "Both sides", "Both sides + middle", "Middle"],
+            ["Right", "Left", "Both sides", "Both sides + middle", "Middle"],
             key="rail_placement",
-            help="Where to place handrails along the step width.",
         )
         if handrail_type != "Curb":
             pole_density = st.slider(
-                "Post density", min_value=0.0, max_value=1.0, step=0.05,
-                key="pole_density",
-                help="0 = anchors only (first & last step of each run + landing edges).  "
-                     "0.5 = bisect runs progressively.  1 = one post per step.",
+                "Post density", 0.0, 1.0, step=0.05, key="pole_density",
+                help="0 = anchors only · 0.5 = bisect runs · 1 = one post per step.",
             )
         else:
             pole_density = st.session_state["pole_density"]
@@ -259,65 +244,33 @@ with st.sidebar:
         edge_width = st.slider("Edge width", min_value=1, max_value=8, key="edge_width")
     else:
         edge_width = st.session_state["edge_width"]
-    projection_type = st.selectbox(
-        "Projection",
-        options=["perspective", "orthographic"],
-        key="projection_type",
-    )
-    fisheye_strength = st.slider(
-        "Fisheye distortion", min_value=0.0, max_value=1.0, step=0.05, key="fisheye_strength",
-        help="0 = off. Barrel distortion that curves straight lines (mesh subdivided to keep curves smooth).",
-    )
-    st.caption("Camera angle (also controls export view)")
-    col_ca, col_ce = st.columns(2)
-    camera_azimuth = col_ca.number_input(
-        "Azimuth°", min_value=-180.0, max_value=180.0, step=5.0, key="camera_azimuth",
-        help="Horizontal rotation around model (0° = +X axis, 90° = +Y, 270°/−90° = −Y).",
-    )
-    camera_elevation = col_ce.number_input(
-        "Elevation°", min_value=1.0, max_value=89.0, step=5.0, key="camera_elevation",
-        help="Tilt above the horizon (30° = default, 89° = near top-down).",
-    )
-    camera_zoom = st.slider(
-        "Zoom", min_value=0.4, max_value=3.0, step=0.05, key="camera_zoom",
-        help="1.0 = default distance. Lower = zoom in, higher = zoom out.",
-    )
 
-    with st.expander("Lighting", expanded=False):
-        ambient = st.slider(
-            "Ambient", min_value=0.0, max_value=1.0, step=0.05, key="ambient",
-            help="Baseline light on all surfaces.",
+    st.caption("Drag/zoom the viewer to set the camera. Pin to lock for PNG/SVG export.")
+    _has_captured = bool(st.session_state.get("captured_camera"))
+    if _has_captured:
+        if st.button("📌 Pinned · clear", use_container_width=True,
+                     help="Drop pinned camera; export uses live viewer angle again."):
+            st.session_state.pop("captured_camera", None)
+            st.session_state["_capture_pending"] = False
+            st.rerun()
+    else:
+        if st.button("📌 Pin viewer camera", use_container_width=True,
+                     help="Capture the live drag/zoom state and reuse it for the next render + PNG/SVG export."):
+            st.session_state["_capture_nonce"] = st.session_state.get("_capture_nonce", 0) + 1
+            st.session_state["_capture_pending"] = True
+
+    if st.session_state.get("_capture_pending"):
+        cam = streamlit_js_eval(
+            js_expressions=_CAM_CAPTURE_JS,
+            key=f"cam_capture_{st.session_state['_capture_nonce']}",
         )
-        diffuse = st.slider(
-            "Diffuse", min_value=0.0, max_value=1.0, step=0.05, key="diffuse",
-            help="Directional light contribution.",
-        )
-        specular = st.slider(
-            "Specular", min_value=0.0, max_value=1.0, step=0.05, key="specular",
-            help="Shininess highlight intensity.",
-        )
-        roughness = st.slider(
-            "Roughness", min_value=0.0, max_value=1.0, step=0.05, key="roughness",
-            help="Surface roughness — higher = more matte.",
-        )
-        st.caption("Key light position (relative to model centroid, in world_scale units)")
-        col_lx, col_ly, col_lz = st.columns(3)
-        light_x = col_lx.number_input("X", min_value=-30.0, max_value=30.0, step=0.5, key="light_x")
-        light_y = col_ly.number_input("Y", min_value=-30.0, max_value=30.0, step=0.5, key="light_y")
-        light_z = col_lz.number_input("Z", min_value=-30.0, max_value=30.0, step=0.5, key="light_z")
-        light_intensity = st.slider(
-            "Light intensity", min_value=0.0, max_value=2.0, step=0.05, key="light_intensity",
-        )
-        spotlight_enabled = st.checkbox(
-            "Spotlight (cone)", key="spotlight_enabled",
-            help="Convert key light into a positional spotlight aimed at the model centroid.",
-        )
-        if spotlight_enabled:
-            spotlight_cone_angle = st.slider(
-                "Cone angle°", min_value=5.0, max_value=80.0, step=1.0, key="spotlight_cone_angle",
-            )
-        else:
-            spotlight_cone_angle = st.session_state["spotlight_cone_angle"]
+        if cam is not None:
+            st.session_state["_capture_pending"] = False
+            if isinstance(cam, dict) and "position" in cam:
+                st.session_state["captured_camera"] = cam
+                st.rerun()
+            else:
+                st.warning(f"Capture failed: {cam}")
 
 RAIL_PLACEMENT_UI_MAP = {
     "Right": "right",
@@ -358,25 +311,17 @@ mesh_parts = _cached_mesh_parts(json.dumps(params, sort_keys=True, default=str))
 
 
 def _build_plotter(off_screen: bool, window_size):
+    cap = st.session_state.get("captured_camera")
+    cam_pos = None
+    if cap and "position" in cap:
+        cam_pos = [tuple(cap["position"]), tuple(cap["focal_point"]), tuple(cap["up"])]
     return build_pyvista_plotter(
         mesh_parts,
         window_size=window_size,
         background_color=background_color,
         viewer_mode=viewer_mode_map[viewer_mode],
         edge_width=edge_width,
-        ambient=ambient,
-        diffuse=diffuse,
-        specular=specular,
-        specular_power=max(1.0, (1.0 - roughness) * 100.0),
-        fisheye_strength=fisheye_strength,
-        projection_type=projection_type,
-        camera_azimuth=camera_azimuth,
-        camera_elevation=camera_elevation,
-        camera_zoom=camera_zoom,
-        light_position=(light_x, light_y, light_z),
-        light_intensity=light_intensity,
-        spotlight_enabled=spotlight_enabled,
-        spotlight_cone_angle=spotlight_cone_angle,
+        camera_position=cam_pos,
         off_screen=off_screen,
     )
 
@@ -393,23 +338,9 @@ _viewer_key = "stairset_pv_" + _hashlib.md5(
         {
             **params,
             "viewer_mode": viewer_mode,
-            "projection_type": projection_type,
-            "fisheye_strength": fisheye_strength,
-            "camera_azimuth": camera_azimuth,
-            "camera_elevation": camera_elevation,
-            "camera_zoom": camera_zoom,
-            "ambient": ambient,
-            "diffuse": diffuse,
-            "specular": specular,
-            "roughness": roughness,
             "edge_width": edge_width,
             "background_color": background_color,
-            "light_x": light_x,
-            "light_y": light_y,
-            "light_z": light_z,
-            "light_intensity": light_intensity,
-            "spotlight_enabled": spotlight_enabled,
-            "spotlight_cone_angle": spotlight_cone_angle,
+            "captured_camera": st.session_state.get("captured_camera"),
         },
         sort_keys=True,
         default=str,
@@ -423,8 +354,8 @@ stpyvista(
     key=_viewer_key,
 )
 st.caption(
-    "Drag = rotate · Shift+drag = pan · scroll = zoom. "
-    "Live drags don't survive parameter changes (pyvista re-renders the scene)."
+    "Drag = rotate · Shift+drag = pan · scroll = zoom · "
+    "Pin viewer camera to keep the live angle across param changes."
 )
 
 obj_bytes = export_obj(mesh_parts).encode("utf-8")
@@ -442,29 +373,34 @@ with st.sidebar:
             use_container_width=True,
         )
 
-        st.markdown("**Print render** (server-side, off-screen VTK render at print resolution).")
+        st.markdown("**Print render**")
         col_p1, col_p2 = st.columns(2)
-        png_paper = col_p1.selectbox(
-            "Paper", options=list(PAPER_SIZES_INCHES.keys()), index=0, key="png_paper",
-        )
-        png_orientation = col_p2.selectbox(
-            "Orient", options=["portrait", "landscape"], key="png_orientation",
-        )
-        png_dpi = st.select_slider(
-            "DPI", options=[72, 150, 300, 600], value=300, key="png_dpi",
-        )
+        png_paper = col_p1.selectbox("Paper", list(PAPER_SIZES_INCHES.keys()), index=0, key="png_paper")
+        png_orientation = col_p2.selectbox("Orient", ["portrait", "landscape"], key="png_orientation")
+        png_dpi = st.select_slider("DPI", options=[72, 150, 300, 600], value=300, key="png_dpi")
         _w_in, _h_in = PAPER_SIZES_INCHES[png_paper]
         if png_orientation == "landscape":
             _w_in, _h_in = _h_in, _w_in
         _png_w = int(_w_in * png_dpi)
         _png_h = int(_h_in * png_dpi)
-        st.caption(f"{_png_w} × {_png_h} px · uses the same camera/lighting/effects as the viewer.")
+        st.caption(f"{_png_w} × {_png_h} px · matches viewer camera/lighting.")
 
         if st.button("Render PNG", use_container_width=True, key="render_png_btn"):
             with st.spinner("Rendering…"):
                 _off_plotter = _build_plotter(off_screen=True, window_size=(_png_w, _png_h))
+                import datetime as _dt
+                _payload = json.dumps(
+                    {
+                        "app": "stairset-generation",
+                        "ts": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                        "preset": params,
+                    },
+                    sort_keys=True,
+                    default=str,
+                    separators=(",", ":"),
+                ).encode("utf-8")
                 st.session_state["png_bytes"] = screenshot_png(
-                    _off_plotter, window_size=(_png_w, _png_h)
+                    _off_plotter, window_size=(_png_w, _png_h), payload=_payload,
                 )
                 _off_plotter.close()
         if st.session_state.get("png_bytes"):
@@ -496,5 +432,5 @@ with st.sidebar:
                 use_container_width=True,
             )
 
-        st.caption("Preset URL (copy to share):")
+        st.caption("Preset URL")
         st.code(_preset_url(), language=None)
