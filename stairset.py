@@ -747,8 +747,9 @@ def build_stair_mesh_parts(
                 if is_round:
                     jv, jf = build_uv_sphere(rail_r * 1.05, tuple(rail_pts[i]))
                 else:
-                    s = rail_w * 1.4
-                    jv, jf = build_box(s, s, s, tuple(rail_pts[i]))
+                    # Cylinder axis = X (horizontal, perpendicular to stair run)
+                    # so it sits flush across the rail width at each kink.
+                    jv, jf = build_oriented_cylinder(rail_w * 0.5, rail_w * 1.05, tuple(rail_pts[i]), (1.0, 0.0, 0.0), segments=12)
                 mesh_parts.append({"vertices": jv, "faces": jf, "color": handrail_color})
 
         for step_i, prio in step_priority.items():

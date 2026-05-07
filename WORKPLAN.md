@@ -18,7 +18,7 @@
 
 - [x] **ZV1-3** ~1hr: `?preset=` URL loader done (2026-04-25)
 - [x] **STR-EXPORT** done (2026-05-07): `render_png` accepts `dpi=` + `paper=` + `orientation=`; A3@300dpi verified at 3507×4962. Sidebar Render PNG button + download_button wired in streamlit_app.py.
-- [ ] **ZV1-preset-stair** ~30min: Create 2–3 Zine Vol.1 candidate presets — run render, save params as `presets/zine-vol1-*.json`
+- [x] **ZV1-preset-stair** done (2026-05-07): `presets/zine-vol1-arch.json` (12-step minimal), `presets/zine-vol1-split.json` (5+6 landing, Square rail, fisheye 0.15), `presets/zine-vol1-abstract.json` (4+4+4, Curb, fisheye 0.55, spotlight)
 - [ ] **STR-2** ~1hr: Evaluate stair renders as Prodigi print product — pick 3–4 strongest outputs at A3 300dpi
 
 ### Revenue path (deferred)
@@ -48,6 +48,7 @@
 **Why**: Plotly path was hitting limits — broken ortho lighting, camera reset on param change, matplotlib PNG export mismatched viewer (different camera + no z-buffer → middle rail vanishing behind stairs).
 
 **What changed**:
+
 - Viewer: `build_plotly_meshes` → `build_pyvista_plotter` (VTK PolyData per part, Phong shading, key+fill lights). `streamlit_app.py` uses `stpyvista()` instead of `st.plotly_chart()`.
 - PNG export: matplotlib `render_png` removed; new `screenshot_png(plotter, window_size)` does server-side off-screen VTK render at exact print res (A3@300dpi → 3507×4962 verified). Same camera/lighting/effects as viewer.
 - Vector export: added "Render vector (SVG)" using `Plotter.save_graphic` — clean lines for zine print.
@@ -56,6 +57,7 @@
 - Cloud: `pv.start_xvfb()` called on Linux when DISPLAY empty.
 
 **Wins**:
+
 - Ortho lighting works — depth is visible per step (was flat in Plotly ortho).
 - Z-buffer correct — middle rail no longer hidden behind stair body.
 - Print PNG = exact live view (same VTK pipeline server-side and client-side).
@@ -63,16 +65,21 @@
 - Vector SVG export for zine.
 
 **Trade-offs / open issues**:
+
 - **Camera not preserved across Python reruns**: pyvista builds a fresh plotter on every script run; client-side drags are local to the iframe and don't sync back. (Plotly's `uirevision` did keep dragged eye.) Followup: add JS bridge that captures VTK panel camera state and stores in `st.session_state`.
 - **Fisheye is still mesh-distortion**, not viewer post-process. VTK supports custom GLSL shader replacement → feasible but unimplemented.
 - Server-side print render takes ~5-10s at A3@300dpi (off-screen VTK render is heavier than matplotlib was).
 
 ## Post-migration fixes (2026-05-07)
 
-- [x] **Square rail gap at kinks**: rail segments meet with perpendicular box ends → visible inner-corner gap. Added 1.4×rail_w filler cube at every keypoint (round rails skip — cylindrical caps already meet cleanly).
+- [x] **Square rail gap at kinks**: rail segments meet with perpendicular box ends → visible inner-corner gap. Added 1.4×rail_w filler cube at every keypoint.
+- [x] **Round rail joint filler**: UV-sphere (rail_w diameter, 6 stacks × 8 slices) at every keypoint for round-style rails; spherical caps fill gaps cleanly.
+- [x] **Drop Metal style**: removed from handrail type options (was duplicate of Round); options now: Round, Square, Curb.
 - [x] **mesh_parts caching**: `@st.cache_data` (max 32 entries) keyed on JSON-serialised `params`. Repeated tweaks to non-geometric params (lighting, viewer mode) reuse cached geometry.
 - [x] **Viewer key fix**: stpyvista 0.1.x caches by `key`. Stable key suppressed re-renders. Now keys hash full live config so each unique scene re-mounts → live updates work.
 - [x] **Pan / zoom hint**: added caption "Drag = rotate · Shift+drag = pan · scroll = zoom." beneath viewer.
+- [x] **Square rail joint cylinder** done (2026-05-07): bisector-aligned `build_oriented_cylinder(rail_w*0.6, rail_w*2.2)` at every kink — smooth transition at square rail bends.
+- [x] **Verify round rail joints + no Metal in browser** done (2026-05-07): smoke tests pass; app restarted; Metal absent from options.
 
 ## Open after migration
 
@@ -129,7 +136,7 @@ if _raw:
 
 - [x] **ZV1-3** ~1hr: `?preset=` URL loader done (2026-04-25)
 - [x] **STR-EXPORT** done (2026-05-07): `render_png` accepts `dpi=` + `paper=` + `orientation=`; A3@300dpi verified at 3507×4962. Sidebar Render PNG button + download_button wired in streamlit_app.py.
-- [ ] **ZV1-preset-stair** ~30min: Create 2–3 Zine Vol.1 candidate presets — run render, save params as `presets/zine-vol1-*.json`
+- [x] **ZV1-preset-stair** done (2026-05-07): `presets/zine-vol1-arch.json` (12-step minimal), `presets/zine-vol1-split.json` (5+6 landing, Square rail, fisheye 0.15), `presets/zine-vol1-abstract.json` (4+4+4, Curb, fisheye 0.55, spotlight)
 - [ ] **STR-2** ~1hr: Evaluate stair renders as Prodigi print product — pick 3–4 strongest outputs at A3 300dpi
 
 ### Revenue path (deferred)
