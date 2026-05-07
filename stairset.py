@@ -1,4 +1,5 @@
 import json
+from typing import Optional
 
 import numpy as np
 from vectorlab import fisheye_vertex as _vectorlab_fisheye
@@ -174,6 +175,37 @@ def build_oriented_cylinder(radius, height, center, direction, segments=16):
     return transform_vertices(vertices, rotation, center), faces
 
 
+def build_uv_sphere(radius, center, lat_segments=8, lon_segments=12):
+    """Low-poly UV sphere centered at `center`. Returns (vertices, faces)."""
+    cx, cy, cz = center
+    verts = [[cx, cy, cz + radius]]  # north pole
+    for i in range(1, lat_segments):
+        theta = np.pi * i / lat_segments
+        z = np.cos(theta) * radius
+        r = np.sin(theta) * radius
+        for j in range(lon_segments):
+            phi = 2.0 * np.pi * j / lon_segments
+            verts.append([cx + r * np.cos(phi), cy + r * np.sin(phi), cz + z])
+    verts.append([cx, cy, cz - radius])  # south pole
+    faces = []
+    for j in range(lon_segments):
+        nxt = (j + 1) % lon_segments
+        faces.append([0, 1 + nxt, 1 + j])
+    for i in range(lat_segments - 2):
+        ring0 = 1 + i * lon_segments
+        ring1 = ring0 + lon_segments
+        for j in range(lon_segments):
+            nxt = (j + 1) % lon_segments
+            faces.append([ring0 + j, ring0 + nxt, ring1 + nxt])
+            faces.append([ring0 + j, ring1 + nxt, ring1 + j])
+    south = len(verts) - 1
+    last_ring = south - lon_segments
+    for j in range(lon_segments):
+        nxt = (j + 1) % lon_segments
+        faces.append([south, last_ring + j, last_ring + nxt])
+    return np.array(verts, dtype=float), np.array(faces, dtype=int)
+
+
 def build_cylinder(radius, height, center, segments=16):
     cx, cy, cz = center
     dz = height / 2.0
@@ -215,6 +247,86 @@ def apply_fisheye(vertices, strength=0.0, center=None):
     return _vectorlab_fisheye(vertices, strength=strength, center=center)
 
 
+def subdivide_mesh(vertices, faces, levels=2):
+    """Recursively split each triangle into 4 sub-triangles via edge midpoints.
+
+    levels=0 -> no change. levels=N -> 4**N triangles per original face.
+    Returns (new_vertices, new_faces).
+    """
+    if levels <= 0:
+        return vertices, faces
+    v = vertices.copy()
+    f = faces.copy()
+    for _ in range(levels):
+        midpoint_cache: dict[tuple[int, int], int] = {}
+        v_list = v.tolist()
+
+        def _mid(a: int, b: int) -> int:
+            key = (a, b) if a < b else (b, a)
+            idx = midpoint_cache.get(key)
+            if idx is None:
+                mp = ((v[a] + v[b]) / 2.0).tolist()
+                idx = len(v_list)
+                v_list.append(mp)
+                midpoint_cache[key] = idx
+            return idx
+
+        new_faces = []
+        for tri in f:
+            a, b, c = int(tri[0]), int(tri[1]), int(tri[2])
+            ab = _mid(a, b)
+            bc = _mid(b, c)
+            ca = _mid(c, a)
+            new_faces.extend([[a, ab, ca], [ab, b, bc], [ca, bc, c], [ab, bc, ca]])
+        v = np.array(v_list, dtype=float)
+        f = np.array(new_faces, dtype=int)
+    return v, f
+
+
+def explode_per_face(vertices, faces, factor, scale):
+    """Detach every triangle and offset it outward along its own face normal.
+
+    Returns (new_vertices, new_faces) with 3 unique verts per triangle.
+    Coplanar triangle pairs (e.g. cube quads) move in lockstep so cubes split
+    into 6 separated squares; curved meshes shatter into shards radially.
+
+    Triangle normals are flipped where needed to point AWAY from the part
+    centroid, so explode always pushes outward regardless of mesh winding.
+    """
+    if factor <= 0.0:
+        return vertices, faces
+    if len(faces) == 0:
+        return vertices, faces
+    tris = vertices[faces]  # (N, 3, 3)
+    edge1 = tris[:, 1] - tris[:, 0]
+    edge2 = tris[:, 2] - tris[:, 0]
+    normals = np.cross(edge1, edge2)
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms = np.where(norms < 1e-12, 1.0, norms)
+    unit_normals = normals / norms
+
+    part_centroid = vertices.mean(axis=0)
+    tri_centroids = tris.mean(axis=1)
+    outward = tri_centroids - part_centroid
+    flip = np.einsum("ij,ij->i", unit_normals, outward) < 0.0
+    unit_normals[flip] *= -1.0
+
+    offsets = unit_normals * (factor * scale)
+    new_tris = tris + offsets[:, None, :]
+    new_vertices = new_tris.reshape(-1, 3)
+    new_faces = np.arange(len(faces) * 3, dtype=int).reshape(-1, 3)
+    return new_vertices, new_faces
+
+
+def _world_centroid_and_scale(mesh_parts):
+    if not mesh_parts:
+        return np.zeros(3), 1.0
+    all_v = np.vstack([p["vertices"] for p in mesh_parts])
+    mins = all_v.min(axis=0)
+    maxs = all_v.max(axis=0)
+    return (mins + maxs) / 2.0, float(np.max(maxs - mins))
+
+
 def build_plotly_meshes(
     mesh_parts,
     viewer_mode="faces",
@@ -224,17 +336,60 @@ def build_plotly_meshes(
     diffuse=0.8,
     specular=0.3,
     roughness=0.5,
+    explode_factor=0.0,
+    fisheye_subdivide_levels=None,
+    projection_type="perspective",
+    light_position=None,
 ):
     import plotly.graph_objects as go
 
     traces = []
+    world_c, world_scale = _world_centroid_and_scale(mesh_parts)
+
+    if fisheye_subdivide_levels is None:
+        if fisheye_strength <= 0.0:
+            sub_levels = 0
+        elif fisheye_strength < 0.4:
+            sub_levels = 2
+        elif fisheye_strength < 0.7:
+            sub_levels = 3
+        else:
+            sub_levels = 4
+    else:
+        sub_levels = int(fisheye_subdivide_levels)
+
+    fisheye_center_xz = (float(world_c[0]), float(world_c[2]))
+    explode_scale = world_scale * 0.15
+
+    # Light positioned relative to world centroid + user-provided XYZ offset
+    # (in world_scale units) so shading reads consistently in both perspective
+    # and orthographic projections. In ortho we also bump ambient so unlit
+    # faces still receive baseline light.
+    if light_position is None:
+        lx, ly, lz = 4.0, -8.0, 12.0
+    else:
+        lx, ly, lz = light_position
+    light_pos = dict(
+        x=world_c[0] + world_scale * float(lx),
+        y=world_c[1] + world_scale * float(ly),
+        z=world_c[2] + world_scale * float(lz),
+    )
+    is_ortho = str(projection_type).lower().startswith("ortho")
+    eff_ambient = min(1.0, ambient + (0.15 if is_ortho else 0.0))
 
     for part in mesh_parts:
         vertices = part["vertices"]
-        if fisheye_strength > 0.0:
-            vertices = apply_fisheye(vertices, fisheye_strength)
-
         faces = part["faces"]
+
+        if explode_factor > 0.0:
+            vertices, faces = explode_per_face(vertices, faces, explode_factor, explode_scale)
+
+        if sub_levels > 0:
+            vertices, faces = subdivide_mesh(vertices, faces, levels=sub_levels)
+
+        if fisheye_strength > 0.0:
+            vertices = apply_fisheye(vertices, fisheye_strength, center=fisheye_center_xz)
+
         color = part.get("color", "#999999")
 
         if viewer_mode in ("faces", "faces+edges"):
@@ -253,12 +408,14 @@ def build_plotly_meshes(
                     showlegend=False,
                     name="",
                     lighting=dict(
-                        ambient=ambient,
+                        ambient=eff_ambient,
                         diffuse=diffuse,
                         specular=specular,
                         roughness=roughness,
+                        facenormalsepsilon=1e-12,
+                        vertexnormalsepsilon=1e-12,
                     ),
-                    lightposition=dict(x=100, y=200, z=0),
+                    lightposition=light_pos,
                 )
             )
 
@@ -288,6 +445,38 @@ def build_plotly_meshes(
     return traces
 
 
+RAIL_PLACEMENT_PRESETS = {
+    "right": ["right"],
+    "left": ["left"],
+    "center": ["center"],
+    "side": ["right"],  # legacy alias
+    "both": ["left", "right"],
+    "both+center": ["left", "right", "center"],
+}
+
+
+def _normalize_rail_placements(rail_placement):
+    """Accept str | list[str]. Return list of {'left','right','center'}.
+
+    String inputs map via RAIL_PLACEMENT_PRESETS (lower-cased). Unknown strings
+    fall back to ["right"] to preserve historical default.
+    """
+    if isinstance(rail_placement, (list, tuple, set)):
+        normalized = [str(p).lower() for p in rail_placement]
+        valid = [p for p in normalized if p in {"left", "right", "center"}]
+        return valid or ["right"]
+    key = str(rail_placement).lower()
+    return list(RAIL_PLACEMENT_PRESETS.get(key, ["right"]))
+
+
+def _placement_to_x(placement, step_width, inset):
+    if placement == "center":
+        return 0.0
+    if placement == "left":
+        return -(step_width / 2.0 - inset)
+    return step_width / 2.0 - inset  # right (default)
+
+
 def build_stair_mesh_parts(
     step_count=8,
     step_width=1.0,
@@ -297,7 +486,7 @@ def build_stair_mesh_parts(
     top_extension=0.0,
     enable_handrail=True,
     handrail_style="Metal",
-    rail_placement="side",
+    rail_placement="right",
     pole_density=0.3,
     stair_color="#cccccc",
     handrail_color="#404040",
@@ -361,37 +550,80 @@ def build_stair_mesh_parts(
     style_map = {
         "Round":  {"rail_r": 0.025, "post_r": 0.020, "is_round": True,  "rail_height": 0.9},
         "Square": {"rail_r": 0.030, "post_r": 0.025, "is_round": False, "rail_height": 0.9},
-        "Metal":  {"rail_r": 0.022, "post_r": 0.018, "is_round": True,  "rail_height": 0.9},
         "Curb":   {"thickness": 0.15, "curb_height": 0.88},
     }
-    style = style_map.get(handrail_style, style_map["Metal"])
+    # Legacy alias: presets created before 2026-05-07 may still pass "Metal".
+    style = style_map.get(handrail_style, style_map["Round"])
+
+    placements = _normalize_rail_placements(rail_placement)
 
     if handrail_style == "Curb":
         thickness = style["thickness"]
         curb_height = style["curb_height"]
-        cx = 0.0 if rail_placement == "center" else step_width / 2.0 - thickness / 2.0
-        for i in range(step_count):
-            y_front = float(i) * step_depth + y_extra[i] - (bottom_extension if i == 0 and rail_bottom_ext else 0.0)
-            y_back = float(i + 1) * step_depth + y_extra[i] + (top_extension if i == step_count - 1 and rail_top_ext else 0.0)
-            top_z = float(i + 1) * step_height
-            lv, lf = build_box(
-                thickness, y_back - y_front, curb_height,
-                (cx, (y_front + y_back) / 2.0, top_z + curb_height / 2.0),
-            )
-            mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
-        # Add curb sections over each landing
-        _accum_land_y = 0.0
-        for land in landings_sorted:
-            _after_i = int(land["after_step"])
-            _land_depth = float(land["depth"])
-            _land_y_start = float(_after_i) * step_depth + _accum_land_y
-            _top_z = float(_after_i) * step_height
-            lv, lf = build_box(
-                thickness, _land_depth, curb_height,
-                (cx, _land_y_start + _land_depth / 2.0, _top_z + curb_height / 2.0),
-            )
-            mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
-            _accum_land_y += _land_depth
+        ht = thickness / 2.0  # half-thickness for vertex offsets
+        ch = curb_height
+
+        def _curb_slab_at(cx, y_front, y_back, z_front, z_back):
+            """Parallelogram prism: bottom follows stair slope, top parallel to bottom."""
+            verts = np.array([
+                [cx - ht, y_front, z_front],
+                [cx + ht, y_front, z_front],
+                [cx + ht, y_back,  z_back],
+                [cx - ht, y_back,  z_back],
+                [cx - ht, y_front, z_front + ch],
+                [cx + ht, y_front, z_front + ch],
+                [cx + ht, y_back,  z_back  + ch],
+                [cx - ht, y_back,  z_back  + ch],
+            ], dtype=float)
+            faces = np.array([
+                [0, 2, 1], [0, 3, 2],
+                [4, 5, 6], [4, 6, 7],
+                [0, 1, 5], [0, 5, 4],
+                [3, 7, 6], [3, 6, 2],
+                [0, 4, 7], [0, 7, 3],
+                [1, 2, 6], [1, 6, 5],
+            ], dtype=int)
+            return verts, faces
+
+        for _placement in placements:
+            cx = _placement_to_x(_placement, step_width, thickness / 2.0)
+
+            if bottom_extension > 0.0 and rail_bottom_ext:
+                lv, lf = build_box(
+                    thickness, bottom_extension, ch,
+                    (cx, -bottom_extension / 2.0, ch / 2.0),
+                )
+                mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
+
+            for i in range(step_count):
+                y_front = float(i) * step_depth + y_extra[i]
+                y_back  = float(i + 1) * step_depth + y_extra[i]
+                z_front = float(i) * step_height
+                z_back  = float(i + 1) * step_height
+                lv, lf = _curb_slab_at(cx, y_front, y_back, z_front, z_back)
+                mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
+
+            if top_extension > 0.0 and rail_top_ext:
+                _ext_y = float(step_count) * step_depth + y_extra[step_count - 1]
+                _ext_z = float(step_count) * step_height
+                lv, lf = build_box(
+                    thickness, top_extension, ch,
+                    (cx, _ext_y + top_extension / 2.0, _ext_z + ch / 2.0),
+                )
+                mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
+
+            _accum_land_y = 0.0
+            for land in landings_sorted:
+                _after_i = int(land["after_step"])
+                _land_depth = float(land["depth"])
+                _land_y_start = float(_after_i) * step_depth + _accum_land_y
+                _top_z = float(_after_i) * step_height
+                lv, lf = build_box(
+                    thickness, _land_depth, ch,
+                    (cx, _land_y_start + _land_depth / 2.0, _top_z + ch / 2.0),
+                )
+                mesh_parts.append({"vertices": lv, "faces": lf, "color": handrail_color})
+                _accum_land_y += _land_depth
         return mesh_parts
 
     # Round / Square / Metal
@@ -400,122 +632,145 @@ def build_stair_mesh_parts(
     post_r = style["post_r"]
     is_round = style["is_round"]
     inset = post_r * 3.0
-    rail_x = 0.0 if rail_placement == "center" else step_width / 2.0 - inset
 
-    # Keypoints: at each step tread-centre (not nosing) so posts align with the rail.
-    # Using tread centres also guarantees that landing-end Y and the first
-    # post-landing step's tread-centre Y are offset by step_depth/2, which
-    # removes the degenerate vertical segment that appeared at landing transitions.
     _landing_by_after = {int(l["after_step"]): l for l in landings_sorted}
-    keypoints = []
-    if bottom_extension > 0.0 and rail_bottom_ext:
-        keypoints.append(np.array([rail_x, -bottom_extension, step_height + rail_height]))
-    for i in range(step_count):
-        nosing_y = float(i) * step_depth + y_extra[i]
-        tread_center_y = nosing_y + step_depth / 2.0
-        nosing_z = float(i + 1) * step_height + rail_height
-        keypoints.append(np.array([rail_x, tread_center_y, nosing_z]))
-        # After this step, insert a flat landing rail segment if a landing follows.
-        # The landing_start keypoint has the same Z as the last tread-centre keypoint
-        # (flat transition), and landing_end is step_depth/2 before the next tread
-        # centre, so there is no duplicate-Y vertical segment.
-        _after_key = i + 1
-        if _after_key in _landing_by_after and _after_key < step_count:
-            _land = _landing_by_after[_after_key]
-            _land_z = float(i + 1) * step_height + rail_height
-            _y_land_start = float(i + 1) * step_depth + y_extra[i]
-            _y_land_end = _y_land_start + float(_land["depth"])
-            keypoints.append(np.array([rail_x, _y_land_start, _land_z]))
-            keypoints.append(np.array([rail_x, _y_land_end, _land_z]))
-    if top_extension > 0.0 and rail_top_ext:
-        keypoints.append(np.array([
-            rail_x,
-            float(step_count) * step_depth + y_extra[step_count - 1] + top_extension,
-            float(step_count) * step_height + rail_height,
-        ]))
-    keypoints = np.array(keypoints)
 
-    overhang = 0.15
-    if len(keypoints) >= 2:
-        d0 = keypoints[1] - keypoints[0]
-        d0 /= np.linalg.norm(d0)
-        d1 = keypoints[-1] - keypoints[-2]
-        d1 /= np.linalg.norm(d1)
-        rail_pts = np.vstack([
-            keypoints[0:1] - d0 * overhang,
-            keypoints,
-            keypoints[-1:] + d1 * overhang,
-        ])
-    else:
-        rail_pts = keypoints
-
-    rail_w = rail_r * 2.0
-    for i in range(len(rail_pts) - 1):
-        a, b = rail_pts[i], rail_pts[i + 1]
-        seg = b - a
-        seg_len = float(np.linalg.norm(seg))
-        if seg_len < 1e-4:
-            continue
-        ctr = (a + b) / 2.0
-        if is_round:
-            rv, rf = build_oriented_cylinder(rail_r, seg_len, tuple(ctr), seg, segments=16)
-        else:
-            rv, rf = build_oriented_box(rail_w, rail_w, seg_len, tuple(ctr), seg)
-        mesh_parts.append({"vertices": rv, "faces": rf, "color": handrail_color})
-
-    # --- Smart density-based post placement ---
-    # Build a list of "runs": contiguous step ranges between landings.
-    # run = (first_step_idx, last_step_idx)
+    # --- Density-based post placement (rail-X-independent) ---
+    # Priority tiers: 0.0 = global ends, 0.5 = landing transitions, 0.5-1.0 = inner bisect.
     runs = []
     run_start = 0
     for land in landings_sorted:
-        run_end = int(land["after_step"]) - 1
-        if run_end >= run_start:
-            runs.append((run_start, run_end))
+        run_end_idx = int(land["after_step"]) - 1
+        if run_end_idx >= run_start:
+            runs.append((run_start, run_end_idx))
         run_start = int(land["after_step"])
     runs.append((run_start, step_count - 1))
 
-    # Mandatory posts: first and last step of every run, plus
-    # the step just before and just after every landing.
-    mandatory = set()
-    for r_start, r_end in runs:
-        mandatory.add(r_start)
-        mandatory.add(r_end)
+    step_priority = {0: 0.0, step_count - 1: 0.0}
+    for run_idx in range(len(runs) - 1):
+        r_end = runs[run_idx][1]
+        step_priority.setdefault(r_end, 0.5)
 
-    # Optional posts: filled in by recursive bisection of each run, ordered
-    # by priority (root first, then children).  We collect them as a flat
-    # priority-ordered list per run so we can truncate at the desired count.
-    def _bisect_priority(lo, hi, result):
-        """Add the midpoint of [lo, hi] (inclusive) to result, then recurse."""
-        if hi <= lo:
+    def _bisect_list(arr, lo, hi, result):
+        if hi < lo:
             return
-        mid = (lo + hi) // 2  # lower middle for even-length spans
-        result.append(mid)
-        _bisect_priority(lo, mid - 1, result)
-        _bisect_priority(mid + 1, hi, result)
+        mid = (lo + hi) // 2
+        result.append(arr[mid])
+        _bisect_list(arr, lo, mid - 1, result)
+        _bisect_list(arr, mid + 1, hi, result)
 
-    optional_ordered = []  # priority-ordered list of optional step indices
+    inner_ordered = []
     for r_start, r_end in runs:
-        inner_lo = r_start + 1
-        inner_hi = r_end - 1
-        if inner_hi >= inner_lo:
-            _bisect_priority(inner_lo, inner_hi, optional_ordered)
+        inner = [i for i in range(r_start, r_end + 1) if i not in step_priority]
+        if inner:
+            ordered = []
+            _bisect_list(inner, 0, len(inner) - 1, ordered)
+            inner_ordered.extend(ordered)
 
-    # Clamp density to [0, 1] and compute how many optional posts to include.
+    n_inner = len(inner_ordered)
+    for rank, step_i in enumerate(inner_ordered):
+        step_priority[step_i] = 0.5 + 0.5 * (rank + 1) / n_inner if n_inner else 0.5
+
+    landing_end_posts = []
+    for land in landings_sorted:
+        _after_i = int(land["after_step"])
+        _land_surface_z = float(_after_i) * step_height
+        _tread_center_last = (
+            float(_after_i - 1) * step_depth + y_extra[_after_i - 1] + step_depth / 2.0
+        )
+        _y_land_end = _tread_center_last + float(land["depth"])
+        landing_end_posts.append((_y_land_end, _land_surface_z))
+
     density = float(max(0.0, min(1.0, pole_density)))
-    n_optional = round(density * len(optional_ordered))
-    chosen = mandatory | set(optional_ordered[:n_optional])
-
     vertical = np.array([0.0, 0.0, 1.0])
-    for i in sorted(chosen):
-        nosing_y = float(i) * step_depth + y_extra[i]
-        tread_z = float(i + 1) * step_height
-        post_ctr = (rail_x, nosing_y + step_depth / 2.0, tread_z + rail_height / 2.0)
-        if is_round:
-            pv, pf = build_oriented_cylinder(post_r, rail_height, post_ctr, vertical, segments=12)
+    rail_w = rail_r * 2.0
+
+    for _placement in placements:
+        rail_x = _placement_to_x(_placement, step_width, inset)
+
+        # Keypoints at tread-centres so posts align; landing transitions kink-free.
+        keypoints = []
+        if bottom_extension > 0.0 and rail_bottom_ext:
+            keypoints.append(np.array([rail_x, -bottom_extension, step_height + rail_height]))
+        for i in range(step_count):
+            nosing_y = float(i) * step_depth + y_extra[i]
+            tread_center_y = nosing_y + step_depth / 2.0
+            nosing_z = float(i + 1) * step_height + rail_height
+            keypoints.append(np.array([rail_x, tread_center_y, nosing_z]))
+            _after_key = i + 1
+            if _after_key in _landing_by_after and _after_key < step_count:
+                _land = _landing_by_after[_after_key]
+                _land_z = float(i + 1) * step_height + rail_height
+                _y_land_end = tread_center_y + float(_land["depth"])
+                keypoints.append(np.array([rail_x, _y_land_end, _land_z]))
+        if top_extension > 0.0 and rail_top_ext:
+            keypoints.append(np.array([
+                rail_x,
+                float(step_count) * step_depth + y_extra[step_count - 1] + top_extension,
+                float(step_count) * step_height + rail_height,
+            ]))
+        keypoints = np.array(keypoints)
+
+        overhang = 0.15
+        if len(keypoints) >= 2:
+            d0 = keypoints[1] - keypoints[0]
+            d0 /= np.linalg.norm(d0)
+            d1 = keypoints[-1] - keypoints[-2]
+            d1 /= np.linalg.norm(d1)
+            rail_pts = np.vstack([
+                keypoints[0:1] - d0 * overhang,
+                keypoints,
+                keypoints[-1:] + d1 * overhang,
+            ])
         else:
-            pv, pf = build_box(post_r * 2.0, post_r * 2.0, rail_height, post_ctr)
-        mesh_parts.append({"vertices": pv, "faces": pf, "color": handrail_color})
+            rail_pts = keypoints
+
+        for i in range(len(rail_pts) - 1):
+            a, b = rail_pts[i], rail_pts[i + 1]
+            seg = b - a
+            seg_len = float(np.linalg.norm(seg))
+            if seg_len < 1e-4:
+                continue
+            ctr = (a + b) / 2.0
+            if is_round:
+                rv, rf = build_oriented_cylinder(rail_r, seg_len, tuple(ctr), seg, segments=16)
+            else:
+                rv, rf = build_oriented_box(rail_w, rail_w, seg_len, tuple(ctr), seg)
+            mesh_parts.append({"vertices": rv, "faces": rf, "color": handrail_color})
+
+        # Joint fillers at every kink keypoint. Square rails get an oversized
+        # cube; round rails get a UV-sphere — both straddle the joint and
+        # close the inner-corner gap that perpendicular cylinder/box end-caps
+        # leave at angled rail-to-rail meets.
+        if len(rail_pts) >= 3:
+            for i in range(1, len(rail_pts) - 1):
+                if is_round:
+                    jv, jf = build_uv_sphere(rail_r * 1.05, tuple(rail_pts[i]))
+                else:
+                    s = rail_w * 1.4
+                    jv, jf = build_box(s, s, s, tuple(rail_pts[i]))
+                mesh_parts.append({"vertices": jv, "faces": jf, "color": handrail_color})
+
+        for step_i, prio in step_priority.items():
+            if prio > density:
+                continue
+            nosing_y = float(step_i) * step_depth + y_extra[step_i]
+            tread_z = float(step_i + 1) * step_height
+            post_ctr = (rail_x, nosing_y + step_depth / 2.0, tread_z + rail_height / 2.0)
+            if is_round:
+                pv, pf = build_oriented_cylinder(post_r, rail_height, post_ctr, vertical, segments=12)
+            else:
+                pv, pf = build_box(post_r * 2.0, post_r * 2.0, rail_height, post_ctr)
+            mesh_parts.append({"vertices": pv, "faces": pf, "color": handrail_color})
+
+        if density >= 0.5:
+            for (_y_land_end, _land_surface_z) in landing_end_posts:
+                post_ctr = (rail_x, _y_land_end, _land_surface_z + rail_height / 2.0)
+                if is_round:
+                    pv, pf = build_oriented_cylinder(post_r, rail_height, post_ctr, vertical, segments=12)
+                else:
+                    pv, pf = build_box(post_r * 2.0, post_r * 2.0, rail_height, post_ctr)
+                mesh_parts.append({"vertices": pv, "faces": pf, "color": handrail_color})
 
     return mesh_parts
 
@@ -542,64 +797,185 @@ def export_json(mesh_params):
     return json.dumps(mesh_params, indent=2)
 
 
-def render_png(
-    size: int = 800,
-    elev: float = 20.0,
-    azim: float = -60.0,
-    bg=None,
+PAPER_SIZES_INCHES = {
+    "A3": (11.69, 16.54),
+    "A4": (8.27, 11.69),
+    "Letter": (8.5, 11.0),
+    "Square": (12.0, 12.0),
+}
+
+
+def _faces_to_pyvista(faces: np.ndarray) -> np.ndarray:
+    """Convert (N, 3) triangle indices to pyvista's flat [3, i, j, k, ...] form."""
+    n = len(faces)
+    out = np.empty((n, 4), dtype=np.int64)
+    out[:, 0] = 3
+    out[:, 1:] = faces
+    return out.ravel()
+
+
+def _resolve_sub_levels(fisheye_strength: float, override: Optional[int]) -> int:
+    if override is not None:
+        return int(override)
+    if fisheye_strength <= 0.0:
+        return 0
+    if fisheye_strength < 0.4:
+        return 2
+    if fisheye_strength < 0.7:
+        return 3
+    return 4
+
+
+def build_pyvista_plotter(
+    mesh_parts,
+    *,
+    window_size=(800, 800),
+    background_color: str = "#808080",
+    viewer_mode: str = "faces",
+    edge_color: str = "#222222",
+    edge_width: int = 2,
+    ambient: float = 0.3,
+    diffuse: float = 0.7,
+    specular: float = 0.3,
+    specular_power: float = 20.0,
     fisheye_strength: float = 0.0,
-    **stair_params,
-) -> bytes:
-    """Headless matplotlib render of a stairset → PNG bytes.
+    fisheye_subdivide_levels: Optional[int] = None,
+    explode_factor: float = 0.0,
+    projection_type: str = "perspective",
+    light_position=(4.0, -8.0, 12.0),
+    light_intensity: float = 1.0,
+    spotlight_enabled: bool = False,
+    spotlight_cone_angle: float = 30.0,
+    camera_position=None,
+    off_screen: bool = False,
+):
+    """Build a configured pyvista Plotter for the stair scene.
 
-    All `build_stair_mesh_parts` params pass through via **stair_params.
-    `bg=None` produces a transparent background; pass a matplotlib color
-    string to fill.
+    `mesh_parts` is the output of `build_stair_mesh_parts`. Lighting params map
+    directly to VTK's Phong shader. `light_position` is in world_scale units
+    relative to the model centroid — same convention as the Plotly path so
+    presets translate. Set `spotlight_enabled=True` to attach a VTK spot light.
     """
-    import io
+    import pyvista as pv
 
-    import matplotlib
+    plotter = pv.Plotter(window_size=list(window_size), off_screen=off_screen, lighting="none")
+    plotter.background_color = background_color
+    plotter.parallel_projection = str(projection_type).lower().startswith("ortho")
 
-    matplotlib.use("Agg", force=True)
-    import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    world_c, world_scale = _world_centroid_and_scale(mesh_parts)
+    sub_levels = _resolve_sub_levels(fisheye_strength, fisheye_subdivide_levels)
+    fisheye_center_xz = (float(world_c[0]), float(world_c[2]))
+    explode_scale = world_scale * 0.15
 
-    mesh_parts = build_stair_mesh_parts(**stair_params)
+    show_faces = viewer_mode in ("faces", "faces+edges")
+    show_edges = viewer_mode in ("wireframe", "faces+edges")
 
-    fig = plt.figure(figsize=(size / 150, size / 150), dpi=150)
-    ax = fig.add_subplot(111, projection="3d")
-    ax.set_axis_off()
-
-    all_v = []
     for part in mesh_parts:
         verts = part["vertices"]
-        if fisheye_strength > 0.0:
-            verts = apply_fisheye(verts, fisheye_strength)
         faces = part["faces"]
-        tri = [[verts[i] for i in face] for face in faces]
-        poly = Poly3DCollection(tri, facecolor=part.get("color", "#999999"), edgecolor="none")
-        ax.add_collection3d(poly)
-        all_v.append(verts)
+        if explode_factor > 0.0:
+            verts, faces = explode_per_face(verts, faces, explode_factor, explode_scale)
+        if sub_levels > 0:
+            verts, faces = subdivide_mesh(verts, faces, levels=sub_levels)
+        if fisheye_strength > 0.0:
+            verts = apply_fisheye(verts, fisheye_strength, center=fisheye_center_xz)
 
-    if all_v:
-        v = np.vstack(all_v)
-        mins, maxs = v.min(axis=0), v.max(axis=0)
-        ax.set_xlim(mins[0], maxs[0])
-        ax.set_ylim(mins[1], maxs[1])
-        ax.set_zlim(mins[2], maxs[2])
+        mesh = pv.PolyData(np.asarray(verts, dtype=float), _faces_to_pyvista(faces))
+        color = part.get("color", "#999999")
 
-    try:
-        ax.set_box_aspect((1, 1, 1))
-    except Exception:
-        pass
-    ax.view_init(elev=elev, azim=azim)
+        if show_faces:
+            plotter.add_mesh(
+                mesh,
+                color=color,
+                opacity=1.0,
+                smooth_shading=False,
+                lighting=True,
+                ambient=ambient,
+                diffuse=diffuse,
+                specular=specular,
+                specular_power=specular_power,
+                show_edges=(viewer_mode == "faces+edges"),
+                edge_color=edge_color,
+                line_width=edge_width,
+            )
+        elif show_edges:
+            plotter.add_mesh(
+                mesh,
+                style="wireframe",
+                color=color,
+                line_width=edge_width,
+                lighting=False,
+            )
 
-    transparent = bg is None
-    if not transparent:
-        fig.patch.set_facecolor(bg)
-        ax.set_facecolor(bg)
+    # Lighting: a key directional light at the user-positioned point + a
+    # softer fill light from the opposite side so unlit faces still read.
+    lx, ly, lz = light_position
+    key_pos = (
+        world_c[0] + world_scale * float(lx),
+        world_c[1] + world_scale * float(ly),
+        world_c[2] + world_scale * float(lz),
+    )
+    fill_pos = (
+        world_c[0] - world_scale * float(lx) * 0.6,
+        world_c[1] - world_scale * float(ly) * 0.6,
+        world_c[2] + world_scale * abs(float(lz)) * 0.4,
+    )
+    if spotlight_enabled:
+        key_light = pv.Light(
+            position=key_pos,
+            focal_point=tuple(world_c),
+            color="white",
+            intensity=float(light_intensity),
+            light_type="scene light",
+        )
+        key_light.positional = True
+        key_light.cone_angle = float(spotlight_cone_angle)
+        plotter.add_light(key_light)
+    else:
+        plotter.add_light(
+            pv.Light(
+                position=key_pos,
+                focal_point=tuple(world_c),
+                color="white",
+                intensity=float(light_intensity),
+                light_type="scene light",
+            )
+        )
+    plotter.add_light(
+        pv.Light(
+            position=fill_pos,
+            focal_point=tuple(world_c),
+            color="white",
+            intensity=0.35,
+            light_type="scene light",
+        )
+    )
 
+    if camera_position is not None:
+        plotter.camera_position = camera_position
+    else:
+        # Default home view — equivalent to Plotly's eye=(1.5,-1.5,1.2)
+        focal = tuple(world_c)
+        eye = (
+            world_c[0] + world_scale * 1.5,
+            world_c[1] - world_scale * 1.5,
+            world_c[2] + world_scale * 1.2,
+        )
+        plotter.camera_position = [eye, focal, (0.0, 0.0, 1.0)]
+        plotter.reset_camera_clipping_range()
+
+    return plotter
+
+
+def screenshot_png(plotter, window_size=None, transparent: bool = False) -> bytes:
+    """Render the plotter to PNG bytes at the requested window_size."""
+    import io
+    img = plotter.screenshot(
+        transparent_background=transparent,
+        return_img=True,
+        window_size=list(window_size) if window_size is not None else None,
+    )
+    from PIL import Image
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150, transparent=transparent, bbox_inches="tight", pad_inches=0)
-    plt.close(fig)
+    Image.fromarray(img).save(buf, format="PNG")
     return buf.getvalue()

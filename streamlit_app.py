@@ -1,15 +1,37 @@
 import json
+import os
+import sys
 import urllib.parse
 
-import plotly.graph_objects as go
 import streamlit as st
 
+# pyvista needs xvfb on headless Linux (Streamlit Cloud); harmless on macOS/Win.
+import pyvista as pv
+
+if sys.platform.startswith("linux") and os.environ.get("DISPLAY", "") == "":
+    try:
+        pv.start_xvfb()
+    except Exception:
+        pass
+
+from stpyvista import stpyvista
+
 from stairset import (
-    build_plotly_meshes,
+    PAPER_SIZES_INCHES,
+    build_pyvista_plotter,
     build_stair_mesh_parts,
     export_json,
     export_obj,
+    screenshot_png,
 )
+
+
+@st.cache_data(show_spinner=False, max_entries=32)
+def _cached_mesh_parts(params_json: str):
+    """Mesh-part lists are expensive to recompute and depend purely on geometric
+    params. Cache by JSON-serialised params; falls through to a fresh build on
+    miss. Returned dict is treated read-only by all callers."""
+    return build_stair_mesh_parts(**json.loads(params_json))
 
 st.set_page_config(
     page_title="Stairset Generator",
@@ -19,17 +41,13 @@ st.set_page_config(
 
 st.markdown(
     """<style>
-    /* Remove all top padding so the 3D viewer starts at the very top */
-    .main .block-container {
-        padding-top: 0 !important;
-        padding-bottom: 0 !important;
+    .main .block-container { padding-top: 0 !important; padding-bottom: 0 !important; }
+    /* stpyvista wraps the panel canvas in an iframe; let it fill the viewport */
+    iframe[title="stpyvista.simple"], iframe[title="stpyvista"] {
+        height: calc(100vh - 52px) !important; width: 100% !important; min-height: 400px;
     }
-    /* Give the Plotly chart as much vertical space as possible */
-    [data-testid="stPlotlyChart"] { height: calc(100vh - 52px) !important; min-height: 400px; }
-    [data-testid="stPlotlyChart"] > div { height: 100% !important; min-height: 400px; }
-    /* Tighten the Streamlit header bar */
+    [data-testid="stHtmlIframe"] iframe { width: 100% !important; }
     header[data-testid="stHeader"] { height: 2.5rem !important; min-height: 2.5rem !important; }
-    /* Sidebar app title styling */
     .sidebar-title { font-size: 1.1rem; font-weight: 700; color: #262730; margin-bottom: 0.1rem; }
     .sidebar-subtitle { font-size: 0.75rem; color: #6c7280; margin-bottom: 0.75rem; }
     </style>""",
@@ -47,12 +65,19 @@ DEFAULTS = {
     "rail_bottom_ext": True,
     "rail_top_ext": True,
     "enable_handrail": True,
-    "handrail_type": "Metal",
-    "rail_placement": "Side",
+    "handrail_type": "Round",
+    "rail_placement": "Right",
     "pole_density": 0.3,
     "viewer_mode": "Face colors",
     "projection_type": "perspective",
     "fisheye_strength": 0.0,
+    "explode_factor": 0.0,
+    "light_x": 4.0,
+    "light_y": -8.0,
+    "light_z": 12.0,
+    "light_intensity": 1.0,
+    "spotlight_enabled": False,
+    "spotlight_cone_angle": 30.0,
     "ambient": 0.6,
     "diffuse": 0.8,
     "specular": 0.3,
@@ -192,14 +217,15 @@ with st.sidebar:
     if enable_handrail:
         handrail_type = st.selectbox(
             "Type",
-            options=["Round", "Square", "Metal", "Curb"],
+            options=["Round", "Square", "Curb"],
             key="handrail_type",
+            help="Round/Square = metal handrail. Curb = concrete/stone ledge.",
         )
-        rail_placement = st.radio(
+        rail_placement = st.selectbox(
             "Placement",
-            options=["Side", "Center"],
-            horizontal=True,
+            options=["Right", "Left", "Both sides", "Both sides + middle", "Middle"],
             key="rail_placement",
+            help="Where to place handrails along the step width.",
         )
         if handrail_type != "Curb":
             pole_density = st.slider(
@@ -238,11 +264,11 @@ with st.sidebar:
     )
     fisheye_strength = st.slider(
         "Fisheye distortion", min_value=0.0, max_value=1.0, step=0.05, key="fisheye_strength",
-        help="0 = off. Adds barrel distortion for a wide-angle lens effect.",
+        help="0 = off. Barrel distortion that curves straight lines (mesh subdivided to keep curves smooth).",
     )
-    show_axis_guide = st.checkbox(
-        "Show orientation guide", key="show_axis_guide",
-        help="Displays an XYZ axis reference below the main viewer.",
+    explode_factor = st.slider(
+        "Explode", min_value=0.0, max_value=1.0, step=0.05, key="explode_factor",
+        help="0 = normal. Offsets each mesh part outward from the model centroid — useful for assembly diagrams.",
     )
 
     with st.expander("Lighting", expanded=False):
@@ -262,6 +288,35 @@ with st.sidebar:
             "Roughness", min_value=0.0, max_value=1.0, step=0.05, key="roughness",
             help="Surface roughness — higher = more matte.",
         )
+        st.caption("Key light position (relative to model centroid, in world_scale units)")
+        col_lx, col_ly, col_lz = st.columns(3)
+        light_x = col_lx.number_input("X", min_value=-30.0, max_value=30.0, step=0.5, key="light_x")
+        light_y = col_ly.number_input("Y", min_value=-30.0, max_value=30.0, step=0.5, key="light_y")
+        light_z = col_lz.number_input("Z", min_value=-30.0, max_value=30.0, step=0.5, key="light_z")
+        light_intensity = st.slider(
+            "Light intensity", min_value=0.0, max_value=2.0, step=0.05, key="light_intensity",
+        )
+        spotlight_enabled = st.checkbox(
+            "Spotlight (cone)", key="spotlight_enabled",
+            help="Convert key light into a positional spotlight aimed at the model centroid.",
+        )
+        if spotlight_enabled:
+            spotlight_cone_angle = st.slider(
+                "Cone angle°", min_value=5.0, max_value=80.0, step=1.0, key="spotlight_cone_angle",
+            )
+        else:
+            spotlight_cone_angle = st.session_state["spotlight_cone_angle"]
+
+RAIL_PLACEMENT_UI_MAP = {
+    "Right": "right",
+    "Left": "left",
+    "Both sides": "both",
+    "Both sides + middle": "both+center",
+    "Middle": "center",
+    # Legacy preset values
+    "Side": "right",
+    "Center": "center",
+}
 
 params = {
     "step_count": step_count,
@@ -274,7 +329,7 @@ params = {
     "rail_top_ext": rail_top_ext,
     "enable_handrail": enable_handrail,
     "handrail_style": handrail_type,
-    "rail_placement": rail_placement.lower(),
+    "rail_placement": RAIL_PLACEMENT_UI_MAP.get(rail_placement, "right"),
     "pole_density": pole_density,
     "stair_color": stair_color,
     "handrail_color": handrail_color,
@@ -287,88 +342,74 @@ viewer_mode_map = {
     "Faces + edges": "faces+edges",
 }
 
-mesh_parts = build_stair_mesh_parts(**params)
-plotly_meshes = build_plotly_meshes(
-    mesh_parts,
-    viewer_mode=viewer_mode_map[viewer_mode],
-    fisheye_strength=fisheye_strength,
-    edge_width=edge_width,
-    ambient=ambient,
-    diffuse=diffuse,
-    specular=specular,
-    roughness=roughness,
-)
+mesh_parts = _cached_mesh_parts(json.dumps(params, sort_keys=True, default=str))
 
-scene = {
-    "xaxis": {"visible": False},
-    "yaxis": {"visible": False},
-    "zaxis": {"visible": False},
-    "aspectmode": "data",
-    "dragmode": "orbit",
-    "bgcolor": background_color,
-    "uirevision": "stairset_camera",
-    "camera": {
-        "eye": {"x": 1.5, "y": -1.5, "z": 1.2},
-        "center": {"x": 0, "y": 0, "z": 0},
-        "up": {"x": 0, "y": 0, "z": 1},
-        "projection": {"type": projection_type},
-    },
-}
 
-fig = {
-    "data": plotly_meshes,
-    "layout": {
-        "scene": scene,
-        "showlegend": False,
-        "margin": {"l": 0, "r": 0, "b": 0, "t": 0},
-        "paper_bgcolor": background_color,
-        "uirevision": "stairset_view",
-        "autosize": True,
-    },
-}
+def _build_plotter(off_screen: bool, window_size):
+    return build_pyvista_plotter(
+        mesh_parts,
+        window_size=window_size,
+        background_color=background_color,
+        viewer_mode=viewer_mode_map[viewer_mode],
+        edge_width=edge_width,
+        ambient=ambient,
+        diffuse=diffuse,
+        specular=specular,
+        specular_power=max(1.0, (1.0 - roughness) * 100.0),
+        fisheye_strength=fisheye_strength,
+        explode_factor=explode_factor,
+        projection_type=projection_type,
+        light_position=(light_x, light_y, light_z),
+        light_intensity=light_intensity,
+        spotlight_enabled=spotlight_enabled,
+        spotlight_cone_angle=spotlight_cone_angle,
+        off_screen=off_screen,
+    )
 
-st.plotly_chart(
-    fig,
+
+plotter = _build_plotter(off_screen=True, window_size=(1000, 800))
+
+# stpyvista 0.1.x caches by `key`: a stable key prevents re-rendering on
+# parameter changes. Hash the full live config so each unique scene gets its
+# own component instance. (Trade-off: client-side camera drags don't survive
+# parameter changes — see WORKPLAN open issues.)
+import hashlib as _hashlib
+_viewer_key = "stairset_pv_" + _hashlib.md5(
+    json.dumps(
+        {
+            **params,
+            "viewer_mode": viewer_mode,
+            "projection_type": projection_type,
+            "fisheye_strength": fisheye_strength,
+            "explode_factor": explode_factor,
+            "ambient": ambient,
+            "diffuse": diffuse,
+            "specular": specular,
+            "roughness": roughness,
+            "edge_width": edge_width,
+            "background_color": background_color,
+            "light_x": light_x,
+            "light_y": light_y,
+            "light_z": light_z,
+            "light_intensity": light_intensity,
+            "spotlight_enabled": spotlight_enabled,
+            "spotlight_cone_angle": spotlight_cone_angle,
+        },
+        sort_keys=True,
+        default=str,
+    ).encode()
+).hexdigest()[:12]
+
+stpyvista(
+    plotter,
     use_container_width=True,
-    theme="streamlit",
-    config={
-        "scrollZoom": True,
-        "displayModeBar": True,
-        "doubleClick": "reset",
-        "responsive": True,
-    },
-    key="stairset_plot",
+    panel_kwargs={"orientation_widget": False},
+    key=_viewer_key,
 )
-
-if show_axis_guide:
-    axis_fig = go.Figure()
-    for vec, label, color in [
-        ([1, 0, 0], "X", "red"),
-        ([0, 1, 0], "Y", "green"),
-        ([0, 0, 1], "Z", "blue"),
-    ]:
-        axis_fig.add_trace(go.Scatter3d(
-            x=[0, vec[0]], y=[0, vec[1]], z=[0, vec[2]],
-            mode="lines+text",
-            text=["", label],
-            textposition="top center",
-            line=dict(color=color, width=6),
-            showlegend=False,
-        ))
-    axis_fig.update_layout(
-        scene=dict(
-            xaxis=dict(visible=False, range=[-0.2, 1.2]),
-            yaxis=dict(visible=False, range=[-0.2, 1.2]),
-            zaxis=dict(visible=False, range=[-0.2, 1.2]),
-            aspectmode="cube",
-        ),
-        margin=dict(l=0, r=0, b=0, t=0),
-        paper_bgcolor="rgba(0,0,0,0)",
-    )
-    st.plotly_chart(
-        axis_fig, use_container_width=True, height=260,
-        config={"displayModeBar": False},
-    )
+st.caption(
+    "Drag = rotate · Shift+drag = pan · scroll = zoom. "
+    "Live drags don't survive parameter changes (pyvista re-renders the scene)."
+)
 
 obj_bytes = export_obj(mesh_parts).encode("utf-8")
 json_bytes = export_json(params).encode("utf-8")
@@ -384,5 +425,60 @@ with st.sidebar:
             "JSON", json_bytes, file_name="stairset-config.json", mime="application/json",
             use_container_width=True,
         )
+
+        st.markdown("**Print render** (server-side, off-screen VTK render at print resolution).")
+        col_p1, col_p2 = st.columns(2)
+        png_paper = col_p1.selectbox(
+            "Paper", options=list(PAPER_SIZES_INCHES.keys()), index=0, key="png_paper",
+        )
+        png_orientation = col_p2.selectbox(
+            "Orient", options=["portrait", "landscape"], key="png_orientation",
+        )
+        png_dpi = st.select_slider(
+            "DPI", options=[72, 150, 300, 600], value=300, key="png_dpi",
+        )
+        _w_in, _h_in = PAPER_SIZES_INCHES[png_paper]
+        if png_orientation == "landscape":
+            _w_in, _h_in = _h_in, _w_in
+        _png_w = int(_w_in * png_dpi)
+        _png_h = int(_h_in * png_dpi)
+        st.caption(f"{_png_w} × {_png_h} px · uses the same camera/lighting/effects as the viewer.")
+
+        if st.button("Render PNG", use_container_width=True, key="render_png_btn"):
+            with st.spinner("Rendering…"):
+                _off_plotter = _build_plotter(off_screen=True, window_size=(_png_w, _png_h))
+                st.session_state["png_bytes"] = screenshot_png(
+                    _off_plotter, window_size=(_png_w, _png_h)
+                )
+                _off_plotter.close()
+        if st.session_state.get("png_bytes"):
+            st.download_button(
+                "Download PNG",
+                st.session_state["png_bytes"],
+                file_name=f"stairset-{png_paper}-{png_dpi}dpi.png",
+                mime="image/png",
+                use_container_width=True,
+            )
+
+        if st.button("Render vector (SVG)", use_container_width=True, key="render_svg_btn"):
+            with st.spinner("Rendering vector…"):
+                import tempfile
+                _vec_plotter = _build_plotter(off_screen=True, window_size=(_png_w, _png_h))
+                with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as _f:
+                    _vec_plotter.save_graphic(_f.name)
+                    _f.flush()
+                    with open(_f.name, "rb") as _r:
+                        st.session_state["svg_bytes"] = _r.read()
+                os.unlink(_f.name)
+                _vec_plotter.close()
+        if st.session_state.get("svg_bytes"):
+            st.download_button(
+                "Download SVG",
+                st.session_state["svg_bytes"],
+                file_name=f"stairset-{png_paper}.svg",
+                mime="image/svg+xml",
+                use_container_width=True,
+            )
+
         st.caption("Preset URL (copy to share):")
         st.code(_preset_url(), language=None)

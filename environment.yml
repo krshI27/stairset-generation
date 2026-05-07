@@ -4,9 +4,11 @@ channels:
 dependencies:
   - python=3.12
   - pip
+  - vtk>=9.3
   - pip:
       - streamlit>=1.26
       - numpy>=1.26
-      - plotly>=5.20
-      - matplotlib>=3.7 # headless render_png
+      - pyvista>=0.43
+      - stpyvista<0.2  # 0.2+ requires streamlit components v2; pin to 0.1.x
+      - matplotlib>=3.7 # headless print render fallback
       - git+https://github.com/krshI27/vectorlab.git
