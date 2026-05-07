@@ -565,6 +565,10 @@ def build_stair_mesh_parts(
 
         def _curb_slab_at(cx, y_front, y_back, z_front, z_back):
             """Parallelogram prism: bottom follows stair slope, top parallel to bottom."""
+            # Lift bottom by 1 mm so the base face doesn't z-fight the step top.
+            _eps = 0.001
+            z_front += _eps
+            z_back += _eps
             verts = np.array([
                 [cx - ht, y_front, z_front],
                 [cx + ht, y_front, z_front],
@@ -841,13 +845,15 @@ def build_pyvista_plotter(
     specular_power: float = 20.0,
     fisheye_strength: float = 0.0,
     fisheye_subdivide_levels: Optional[int] = None,
-    explode_factor: float = 0.0,
     projection_type: str = "perspective",
     light_position=(4.0, -8.0, 12.0),
     light_intensity: float = 1.0,
     spotlight_enabled: bool = False,
     spotlight_cone_angle: float = 30.0,
     camera_position=None,
+    camera_azimuth: float = -45.0,
+    camera_elevation: float = 30.0,
+    camera_zoom: float = 1.0,
     off_screen: bool = False,
 ):
     """Build a configured pyvista Plotter for the stair scene.
@@ -861,12 +867,10 @@ def build_pyvista_plotter(
 
     plotter = pv.Plotter(window_size=list(window_size), off_screen=off_screen, lighting="none")
     plotter.background_color = background_color
-    plotter.parallel_projection = str(projection_type).lower().startswith("ortho")
 
     world_c, world_scale = _world_centroid_and_scale(mesh_parts)
     sub_levels = _resolve_sub_levels(fisheye_strength, fisheye_subdivide_levels)
     fisheye_center_xz = (float(world_c[0]), float(world_c[2]))
-    explode_scale = world_scale * 0.15
 
     show_faces = viewer_mode in ("faces", "faces+edges")
     show_edges = viewer_mode in ("wireframe", "faces+edges")
@@ -874,8 +878,6 @@ def build_pyvista_plotter(
     for part in mesh_parts:
         verts = part["vertices"]
         faces = part["faces"]
-        if explode_factor > 0.0:
-            verts, faces = explode_per_face(verts, faces, explode_factor, explode_scale)
         if sub_levels > 0:
             verts, faces = subdivide_mesh(verts, faces, levels=sub_levels)
         if fisheye_strength > 0.0:
@@ -931,7 +933,10 @@ def build_pyvista_plotter(
         )
         key_light.positional = True
         key_light.cone_angle = float(spotlight_cone_angle)
+        key_light.exponent = 1.0  # soft falloff at cone edge
         plotter.add_light(key_light)
+        # Dim fill so the spot shadow is visible.
+        fill_intensity = 0.05
     else:
         plotter.add_light(
             pv.Light(
@@ -942,12 +947,13 @@ def build_pyvista_plotter(
                 light_type="scene light",
             )
         )
+        fill_intensity = 0.35
     plotter.add_light(
         pv.Light(
             position=fill_pos,
             focal_point=tuple(world_c),
             color="white",
-            intensity=0.35,
+            intensity=fill_intensity,
             light_type="scene light",
         )
     )
@@ -955,15 +961,22 @@ def build_pyvista_plotter(
     if camera_position is not None:
         plotter.camera_position = camera_position
     else:
-        # Default home view — equivalent to Plotly's eye=(1.5,-1.5,1.2)
+        import math as _math
+        _az = _math.radians(float(camera_azimuth))
+        _el = _math.radians(float(camera_elevation))
+        # 2.44 ≈ sqrt(1.5²+1.5²+1.2²) — base distance that matches prior default.
+        _dist = float(camera_zoom) * world_scale * 2.44
         focal = tuple(world_c)
         eye = (
-            world_c[0] + world_scale * 1.5,
-            world_c[1] - world_scale * 1.5,
-            world_c[2] + world_scale * 1.2,
+            world_c[0] + _dist * _math.cos(_el) * _math.cos(_az),
+            world_c[1] + _dist * _math.cos(_el) * _math.sin(_az),
+            world_c[2] + _dist * _math.sin(_el),
         )
         plotter.camera_position = [eye, focal, (0.0, 0.0, 1.0)]
         plotter.reset_camera_clipping_range()
+
+    # Set projection AFTER camera is configured so it survives any camera reset.
+    plotter.parallel_projection = str(projection_type).lower().startswith("ortho")
 
     return plotter
 

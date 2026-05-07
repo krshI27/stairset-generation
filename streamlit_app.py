@@ -71,7 +71,9 @@ DEFAULTS = {
     "viewer_mode": "Face colors",
     "projection_type": "perspective",
     "fisheye_strength": 0.0,
-    "explode_factor": 0.0,
+    "camera_azimuth": -45.0,
+    "camera_elevation": 30.0,
+    "camera_zoom": 1.0,
     "light_x": 4.0,
     "light_y": -8.0,
     "light_z": 12.0,
@@ -266,9 +268,19 @@ with st.sidebar:
         "Fisheye distortion", min_value=0.0, max_value=1.0, step=0.05, key="fisheye_strength",
         help="0 = off. Barrel distortion that curves straight lines (mesh subdivided to keep curves smooth).",
     )
-    explode_factor = st.slider(
-        "Explode", min_value=0.0, max_value=1.0, step=0.05, key="explode_factor",
-        help="0 = normal. Offsets each mesh part outward from the model centroid — useful for assembly diagrams.",
+    st.caption("Camera angle (also controls export view)")
+    col_ca, col_ce = st.columns(2)
+    camera_azimuth = col_ca.number_input(
+        "Azimuth°", min_value=-180.0, max_value=180.0, step=5.0, key="camera_azimuth",
+        help="Horizontal rotation around model (0° = +X axis, 90° = +Y, 270°/−90° = −Y).",
+    )
+    camera_elevation = col_ce.number_input(
+        "Elevation°", min_value=1.0, max_value=89.0, step=5.0, key="camera_elevation",
+        help="Tilt above the horizon (30° = default, 89° = near top-down).",
+    )
+    camera_zoom = st.slider(
+        "Zoom", min_value=0.4, max_value=3.0, step=0.05, key="camera_zoom",
+        help="1.0 = default distance. Lower = zoom in, higher = zoom out.",
     )
 
     with st.expander("Lighting", expanded=False):
@@ -357,8 +369,10 @@ def _build_plotter(off_screen: bool, window_size):
         specular=specular,
         specular_power=max(1.0, (1.0 - roughness) * 100.0),
         fisheye_strength=fisheye_strength,
-        explode_factor=explode_factor,
         projection_type=projection_type,
+        camera_azimuth=camera_azimuth,
+        camera_elevation=camera_elevation,
+        camera_zoom=camera_zoom,
         light_position=(light_x, light_y, light_z),
         light_intensity=light_intensity,
         spotlight_enabled=spotlight_enabled,
@@ -381,7 +395,9 @@ _viewer_key = "stairset_pv_" + _hashlib.md5(
             "viewer_mode": viewer_mode,
             "projection_type": projection_type,
             "fisheye_strength": fisheye_strength,
-            "explode_factor": explode_factor,
+            "camera_azimuth": camera_azimuth,
+            "camera_elevation": camera_elevation,
+            "camera_zoom": camera_zoom,
             "ambient": ambient,
             "diffuse": diffuse,
             "specular": specular,
