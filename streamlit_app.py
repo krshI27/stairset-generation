@@ -64,15 +64,35 @@ st.set_page_config(
 
 st.markdown(
     """<style>
+    .stApp { background-color: #E7DED2 !important; color: #30360F !important; }
+    header[data-testid="stHeader"] { background-color: #E7DED2 !important; height: 2.5rem !important; min-height: 2.5rem !important; }
+    section[data-testid="stSidebar"] { background-color: #DDD3C5 !important; padding-top: 16px !important; }
+    [data-testid="stSidebar"] h3 {
+        color: #CB411B !important; font-size: 18px !important; font-weight: 600 !important;
+        letter-spacing: 0.5px !important; padding-bottom: 8px !important;
+        border-bottom: 2px solid rgba(203,65,27,0.3) !important;
+        margin-top: 24px !important; margin-bottom: 12px !important;
+    }
+    [data-testid="stSidebar"] hr { border-color: rgba(203,65,27,0.4) !important; }
+    .stButton > button {
+        background: linear-gradient(135deg, #CB411B 0%, #945029 100%) !important;
+        color: white !important; border: none !important; border-radius: 6px !important;
+        box-shadow: 0 2px 4px rgba(203,65,27,0.3) !important; transition: all 0.2s ease !important;
+    }
+    .stButton > button:hover { transform: translateY(-2px) !important; box-shadow: 0 4px 8px rgba(203,65,27,0.4) !important; }
+    [data-testid="stToggle"] input:checked + div { background-color: #CB411B !important; }
+    .stCaption, [data-testid="stCaptionContainer"] { color: #945029 !important; }
+    a { color: #945029 !important; }
+    button:focus-visible { outline: 2px solid #CB411B !important; outline-offset: 2px !important; }
+    [data-testid="stSpinner"] { color: #CB411B !important; }
+    footer { display: none !important; }
     .main .block-container { padding-top: 0 !important; padding-bottom: 0 !important; }
-    /* stpyvista wraps the panel canvas in an iframe; let it fill the viewport */
     iframe[title="stpyvista.simple"], iframe[title="stpyvista"] {
         height: calc(100vh - 52px) !important; width: 100% !important; min-height: 400px;
     }
     [data-testid="stHtmlIframe"] iframe { width: 100% !important; }
-    header[data-testid="stHeader"] { height: 2.5rem !important; min-height: 2.5rem !important; }
-    .sidebar-title { font-size: 1.1rem; font-weight: 700; color: #262730; margin-bottom: 0.1rem; }
-    .sidebar-subtitle { font-size: 0.75rem; color: #6c7280; margin-bottom: 0.75rem; }
+    .sidebar-title { font-size: 1.1rem; font-weight: 700; color: #30360F; margin-bottom: 0.1rem; }
+    .sidebar-subtitle { font-size: 0.75rem; color: #945029; margin-bottom: 0.75rem; }
     </style>""",
     unsafe_allow_html=True,
 )
