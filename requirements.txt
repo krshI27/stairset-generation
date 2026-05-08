@@ -1,4 +1,6 @@
 numpy>=1.26
 plotly>=5.20
 matplotlib>=3.7
+pyvista>=0.43
+stpyvista<0.2
 streamlit-js-eval>=0.1.7
