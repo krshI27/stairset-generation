@@ -12,8 +12,8 @@ import pyvista as pv
 if sys.platform.startswith("linux") and os.environ.get("DISPLAY", "") == "":
     try:
         pv.start_xvfb()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"xvfb start failed: {e}", file=sys.stderr)
 
 from stpyvista import stpyvista
 
@@ -437,12 +437,13 @@ with st.sidebar:
                 import tempfile
                 _vec_plotter = _build_plotter(off_screen=True, window_size=(_png_w, _png_h))
                 with tempfile.NamedTemporaryFile(suffix=".svg", delete=False) as _f:
-                    _vec_plotter.save_graphic(_f.name)
-                    _f.flush()
-                    with open(_f.name, "rb") as _r:
-                        st.session_state["svg_bytes"] = _r.read()
-                os.unlink(_f.name)
-                _vec_plotter.close()
+                    try:
+                        _vec_plotter.save_graphic(_f.name)
+                        with open(_f.name, "rb") as _r:
+                            st.session_state["svg_bytes"] = _r.read()
+                    finally:
+                        _vec_plotter.close()
+                        os.unlink(_f.name)
         if st.session_state.get("svg_bytes"):
             st.download_button(
                 "Download SVG",
